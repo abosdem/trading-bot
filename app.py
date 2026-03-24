@@ -6,12 +6,13 @@ from flask import Flask
 
 app = Flask(__name__)
 
+# ===== Environment Variables =====
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 FINNHUB_API_KEY = (os.getenv("FINNHUB_API_KEY") or "").strip()
 
+# ===== Settings =====
 WATCHLIST = ["TSLA", "NVDA", "AMD", "PLTR", "SOFI", "NIO"]
-
 ALERT_COOLDOWN = 20 * 60
 SCAN_INTERVAL = 60
 
@@ -24,10 +25,12 @@ session.headers.update({
     "Accept": "application/json"
 })
 
+# ===== Telegram =====
 def tg_api(method, data=None, timeout=15):
     if not BOT_TOKEN:
         print("Missing BOT_TOKEN", flush=True)
         return None
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     try:
         r = session.post(url, data=data, timeout=timeout)
@@ -37,14 +40,17 @@ def tg_api(method, data=None, timeout=15):
         return None
 
 def send(msg, chat_id=None):
-    target_chat = chat_id or CHAT_ID
+    target_chat = str(chat_id or CHAT_ID).strip()
     if not target_chat:
         print("Missing CHAT_ID", flush=True)
         return
+
     tg_api("sendMessage", {"chat_id": target_chat, "text": msg})
 
+# ===== Finnhub =====
 def get_finnhub_quote(symbol):
     if not FINNHUB_API_KEY:
+        print("Missing FINNHUB_API_KEY", flush=True)
         return None
 
     try:
@@ -61,7 +67,6 @@ def get_finnhub_quote(symbol):
         price = data.get("c")
         change = data.get("dp")
         day_high = data.get("h")
-        prev_close = data.get("pc")
 
         if price in (None, 0) or change is None:
             return None
@@ -70,12 +75,13 @@ def get_finnhub_quote(symbol):
             "price": float(price),
             "change": float(change),
             "day_high": float(day_high) if day_high not in (None, 0) else None,
-            "prev_close": float(prev_close) if prev_close not in (None, 0) else None,
         }
+
     except Exception as e:
         print(f"finnhub error {symbol}: {e}", flush=True)
         return None
 
+# ===== Signal Logic =====
 def build_signal(symbol, d):
     price = d.get("price")
     change = d.get("change")
@@ -90,12 +96,15 @@ def build_signal(symbol, d):
     if change > 2:
         score += 3
         reasons.append("تغير قوي")
+
     if change > 4:
         score += 2
         reasons.append("زخم أعلى")
+
     if price < 10:
         score += 1
         reasons.append("سعر مناسب للمضاربة")
+
     if day_high not in (None, 0) and price >= day_high * 0.985:
         score += 2
         reasons.append("قريب من قمة اليوم")
@@ -131,6 +140,7 @@ def build_signal(symbol, d):
     msg += f"\n\n✅ الأسباب: {reasons_text}"
     return msg
 
+# ===== Market Bot =====
 def market_bot():
     print("🔥 FINNHUB BOT STARTED", flush=True)
 
@@ -165,6 +175,7 @@ def market_bot():
             print(f"market bot error: {e}", flush=True)
             time.sleep(20)
 
+# ===== Telegram Commands =====
 def handle_command(text, chat_id):
     t = text.strip().lower()
 
@@ -193,6 +204,7 @@ def handle_command(text, chat_id):
     elif t == "/test":
         send("🔥 اختبار البوت ناجح", chat_id=chat_id)
 
+# ===== Telegram Listener =====
 def telegram_listener():
     global last_update_id
     print("🤖 TELEGRAM LISTENER STARTED", flush=True)
@@ -228,10 +240,12 @@ def telegram_listener():
             print(f"telegram listener error: {e}", flush=True)
             time.sleep(5)
 
+# ===== Flask Routes =====
 @app.route("/", methods=["GET", "POST"])
 def home():
     return "OK"
 
+# ===== Main =====
 if __name__ == "__main__":
     print("🔥 STARTING BOT...", flush=True)
     print("BOT_TOKEN loaded:", bool(BOT_TOKEN), flush=True)

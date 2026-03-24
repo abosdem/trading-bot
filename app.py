@@ -47,24 +47,24 @@ def get_stocks():
     return stocks
 
 def run_bot():
-    print("🔥 BOT WORKING", flush=True)
+    print("🔥 BOT STARTED", flush=True)
 
     while True:
         try:
             stocks = get_stocks()
-            print("📊 OK", flush=True)
+            print("📊 DATA OK", flush=True)
 
             for s in stocks:
                 symbol, price, change, volume = s
 
                 if change > 3 and volume > 500000:
                     if time.time() - sent.get(symbol, 0) > 3600:
-                        msg = f"""🚀 فرصة قوية
+                        msg = f"""🚀 فرصة
 
 📊 {symbol}
 💰 {price}
 ⚡ {change}%
-📈 Volume: {volume}
+📈 Vol: {volume}
 """
                         send(msg)
                         sent[symbol] = time.time()

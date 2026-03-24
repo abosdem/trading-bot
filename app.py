@@ -27,15 +27,16 @@ SCAN_INTERVAL = 90
 MIN_PRICE = 0.50
 MAX_PRICE = 20.0
 MIN_CHANGE = 3.0
-MAX_CHANGE = 15.0
+MAX_CHANGE = 12.0
 
-# لازم يكون فوق القمة بنسبة بسيطة لتأكيد الاختراق
-BREAKOUT_BUFFER = 1.002   # 0.2%
-
-# لو كان فقط قريب من القمة، ما نرسل إلا لو الاندفاع قوي
-NEAR_HIGH_BUFFER = 0.998  # قريب جدًا من القمة
+BREAKOUT_BUFFER = 1.0015      # لازم السعر يكون فوق القمة السابقة قليلًا
+NEAR_HIGH_BUFFER = 0.9985
+MAX_RETESTS = 2               # لو تكرر لمس القمة كثير نرفض
+MIN_RECOVERY_RATIO = 0.85
+MIN_OPEN_DRIVE = 0.025
 
 last_alert = {}
+touch_state = {}  # symbol -> {"high": x, "touches": n, "last_seen": t}
 
 session = requests.Session()
 session.headers.update({
@@ -68,7 +69,7 @@ def handle_command(text, chat_id):
 
     if cmd == "/start":
         send_message(
-            "🚀 البوت المطور جاهز\n\n"
+            "🚀 البوت 9/10 جاهز\n\n"
             "/status - حالة البوت\n"
             "/watchlist - قائمة الأسهم\n"
             "/test - اختبار",
@@ -76,16 +77,13 @@ def handle_command(text, chat_id):
         )
 
     elif cmd == "/status":
-        send_message("✅ البوت يعمل بالفلترة المطورة", chat_id)
+        send_message("✅ البوت يعمل بفلترة 9/10", chat_id)
 
     elif cmd == "/watchlist":
         send_message("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
 
     elif cmd == "/test":
         send_message("🔥 تم الاختبار بنجاح", chat_id)
-
-    else:
-        send_message(f"📩 وصلني: {text}", chat_id)
 
 # ===== FINNHUB =====
 def get_quote(symbol):
@@ -131,7 +129,44 @@ def get_quote(symbol):
         print(f"Finnhub error {symbol}: {e}", flush=True)
         return None
 
-# ===== فلترة مطورة =====
+# ===== TOUCH FILTER =====
+def repeated_touch_filter(symbol, day_high, price):
+    """
+    يمنع الأسهم التي تعيد لمس نفس القمة كثيرًا بدون اختراق فعلي.
+    """
+    now = time.time()
+    state = touch_state.get(symbol)
+
+    if state is None:
+        touch_state[symbol] = {
+            "high": day_high,
+            "touches": 1 if price >= day_high * NEAR_HIGH_BUFFER else 0,
+            "last_seen": now
+        }
+        return False
+
+    # إذا تغيرت قمة اليوم بشكل واضح، نعيد التصفير
+    if abs(day_high - state["high"]) > max(0.01, day_high * 0.003):
+        touch_state[symbol] = {
+            "high": day_high,
+            "touches": 1 if price >= day_high * NEAR_HIGH_BUFFER else 0,
+            "last_seen": now
+        }
+        return False
+
+    # إذا مر وقت طويل بدون متابعة، نخفف الحالة
+    if now - state["last_seen"] > 20 * 60:
+        state["touches"] = 0
+
+    if price >= day_high * NEAR_HIGH_BUFFER:
+        state["touches"] += 1
+
+    state["last_seen"] = now
+    touch_state[symbol] = state
+
+    return state["touches"] > MAX_RETESTS
+
+# ===== SIGNAL FILTER =====
 def build_signal(symbol, quote_data):
     price = quote_data["price"]
     change = quote_data["change"]
@@ -153,39 +188,47 @@ def build_signal(symbol, quote_data):
     if day_range <= 0:
         return None
 
-    # فوق إغلاق أمس
+    # 1) لازم السهم أخضر وواضح
     if price <= prev_close:
         return None
 
-    # فوق الافتتاح
+    # 2) لازم فوق الافتتاح
     if price <= open_price:
         return None
 
-    # ارتداد قوي من قاع اليوم
+    # 3) لازم يكون راجع من القاع بقوة
     recovery_ratio = (price - day_low) / day_range
-    if recovery_ratio < 0.82:
+    if recovery_ratio < MIN_RECOVERY_RATIO:
         return None
 
-    # قوة الاندفاع من الافتتاح
+    # 4) لازم الاندفاع من الافتتاح واضح
     open_drive = (price - open_price) / open_price
-    if open_drive < 0.02:
+    if open_drive < MIN_OPEN_DRIVE:
         return None
 
-    # اختراق فعلي أو تثبيت قوي قرب القمة
-    real_breakout = price >= day_high * BREAKOUT_BUFFER
+    # 5) فلتر التأخر: إذا السعر بعيد جدًا عن الافتتاح نرفض
+    if open_drive > 0.18:
+        return None
+
+    # 6) فلتر الاختراق الحقيقي
+    real_breakout = price > day_high * BREAKOUT_BUFFER
     near_high = price >= day_high * NEAR_HIGH_BUFFER
 
-    if not real_breakout and not near_high:
+    if not (real_breakout or near_high):
         return None
 
-    # إذا كان فقط قريب من القمة، لازم تكون القوة أعلى
+    # 7) إذا مجرد ضغط تحت القمة، لازم يكون قوي جدًا
     if near_high and not real_breakout:
         if change < 5:
             return None
-        if open_drive < 0.035:
-            return None
         if recovery_ratio < 0.90:
             return None
+        if open_drive < 0.04:
+            return None
+
+    # 8) فلتر التكرار
+    if repeated_touch_filter(symbol, day_high, price):
+        return None
 
     score = 0
     reasons = []
@@ -207,7 +250,7 @@ def build_signal(symbol, quote_data):
         reasons.append("اختراق فعلي")
     elif near_high:
         score += 1
-        reasons.append("ضغط تحت القمة")
+        reasons.append("ضغط نظيف")
 
     if recovery_ratio >= 0.90:
         score += 1
@@ -221,7 +264,6 @@ def build_signal(symbol, quote_data):
         score += 1
         reasons.append("اندفاع من الافتتاح")
 
-    # نبي إشارات أقل وأقوى
     if score < 7:
         return None
 
@@ -232,7 +274,6 @@ def build_signal(symbol, quote_data):
     target3 = round(entry * 1.12, 2)
 
     reasons_text = " - ".join(reasons[:4])
-
     signal_type = "اختراق فعلي" if real_breakout else "ضغط قوي قبل الاختراق"
 
     message = (
@@ -253,17 +294,17 @@ def build_signal(symbol, quote_data):
 
     return message
 
-# ===== البوت =====
+# ===== BOT =====
 def market_bot():
-    print("🔥 FILTERED BOT STARTED", flush=True)
+    print("🔥 BOT 9/10 STARTED", flush=True)
 
     if BOT_TOKEN and CHAT_ID:
-        send_message("🔥 البوت المطور شغال")
+        send_message("🔥 البوت 9/10 شغال")
 
     while True:
         try:
             now = time.time()
-            print("📊 scanning filtered...", flush=True)
+            print("📊 scanning 9/10...", flush=True)
 
             for symbol in WATCHLIST:
                 quote_data = get_quote(symbol)
@@ -290,7 +331,7 @@ def market_bot():
             print(f"bot error: {e}", flush=True)
             time.sleep(10)
 
-# ===== Webhook =====
+# ===== WEBHOOK =====
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     try:
@@ -314,14 +355,14 @@ def telegram_webhook():
         print(f"telegram_webhook error: {e}", flush=True)
         return "ok", 200
 
-# ===== الصفحة الرئيسية =====
+# ===== ROOT =====
 @app.route("/", methods=["GET", "POST"])
 def home():
     return "OK", 200
 
-# ===== التشغيل =====
+# ===== MAIN =====
 if __name__ == "__main__":
-    print("🔥 STARTING...", flush=True)
+    print("🔥 STARTING 9/10...", flush=True)
     print("BOT_TOKEN:", bool(BOT_TOKEN), flush=True)
     print("CHAT_ID:", bool(CHAT_ID), flush=True)
     print("FINNHUB:", bool(FINNHUB_API_KEY), flush=True)

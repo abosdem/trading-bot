@@ -2,14 +2,13 @@ from flask import Flask
 import threading
 import time
 import requests
+import os
 
 app = Flask(__name__)
 
-# 🔐 بياناتك
 BOT_TOKEN = "حط_توكن_البوت_هنا"
 CHAT_ID = "حط_ايدي_التليجرام_هنا"
 
-# 📤 إرسال رسالة
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {
@@ -18,18 +17,20 @@ def send_telegram(message):
     }
     requests.post(url, data=data)
 
-# 🤖 البوت
 def bot_loop():
-    send_telegram("🚀 البوت اشتغل بنجاح على Render")
+    send_telegram("🚀 البوت اشتغل بنجاح")
 
     while True:
         print("🔥 البوت شغال ويفحص السوق...")
         time.sleep(60)
 
-# تشغيل البوت
 threading.Thread(target=bot_loop).start()
 
-# ويب بسيط عشان Render
 @app.route("/")
 def home():
-    return "Trading Bot Running"
+    return "Bot is running"
+
+# 🔥 هذا أهم سطر
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

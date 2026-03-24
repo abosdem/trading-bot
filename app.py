@@ -2,7 +2,6 @@ import os
 import time
 import threading
 import requests
-from bs4 import BeautifulSoup
 from flask import Flask
 
 app = Flask(__name__)
@@ -11,6 +10,12 @@ BOT_TOKEN = os.environ.get("8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo")
 CHAT_ID = os.environ.get("912977673")
 
 sent = {}
+
+# قائمة أسهم جاهزة للمضاربة
+WATCHLIST = [
+    "AAPL","TSLA","NVDA","AMD","PLTR","SOFI","NIO","LCID",
+    "RIVN","AI","FUBO","MARA","RIOT","COIN","SPCE"
+]
 
 def send(msg):
     try:
@@ -22,61 +27,32 @@ def send(msg):
     except Exception as e:
         print(f"Telegram error: {e}", flush=True)
 
-def get_stocks():
-    try:
-        url = "https://finviz.com/screener.ashx?v=111&f=geo_usa,sh_price_u10,sh_avgvol_o500,sh_relvol_o2"
-        headers = {"User-Agent": "Mozilla/5.0"}
-
-        r = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
-
-        tickers = []
-        for a in soup.find_all("a"):
-            href = a.get("href", "")
-            txt = a.get_text(strip=True).upper()
-
-            if "quote.ashx?t=" in href and txt.isalpha() and 1 <= len(txt) <= 5:
-                if txt not in tickers:
-                    tickers.append(txt)
-
-        return tickers[:15]
-
-    except Exception as e:
-        print(f"Finviz error: {e}", flush=True)
-        return []
-
 def get_quote(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
 
         r = requests.get(url, headers=headers, timeout=10)
-
-        if "application/json" not in r.headers.get("Content-Type", ""):
-            print(f"Blocked quote for {symbol}", flush=True)
-            return None
-
         data = r.json()
+
         result = data.get("quoteResponse", {}).get("result", [])
         if not result:
             return None
 
         q = result[0]
+
         price = q.get("regularMarketPrice")
         change = q.get("regularMarketChangePercent")
         volume = q.get("regularMarketVolume")
 
-        if price is None or change is None or volume is None:
+        if not price or not change or not volume:
             return None
 
         return {
             "price": round(float(price), 2),
             "change": round(float(change), 2),
             "volume": int(volume),
-            "liquidity": int(float(price) * int(volume))
+            "liquidity": int(price * volume)
         }
 
     except Exception as e:
@@ -106,7 +82,7 @@ def analyze(symbol):
     t2 = round(entry * 1.07, 2)
     t3 = round(entry * 1.10, 2)
 
-    return f"""🚨 إشارة نخبة
+    return f"""🚨 إشارة قوية
 
 📊 السهم: {symbol}
 ⭐ التقييم: {score}/10
@@ -114,9 +90,9 @@ def analyze(symbol):
 💰 الدخول: {entry}
 🛑 الوقف: {stop}
 
-🎯 الهدف 1: {t1}
-🎯 الهدف 2: {t2}
-🎯 الهدف 3: {t3}
+🎯 الهدف1: {t1}
+🎯 الهدف2: {t2}
+🎯 الهدف3: {t3}
 
 💧 السيولة: {data['liquidity']:,}$
 ⚡ التغير: {data['change']}%
@@ -128,10 +104,9 @@ def run_bot():
 
     while True:
         try:
-            stocks = get_stocks()
-            print(f"📊 stocks: {len(stocks)}", flush=True)
+            print(f"📊 scanning {len(WATCHLIST)} stocks", flush=True)
 
-            for symbol in stocks:
+            for symbol in WATCHLIST:
                 signal = analyze(symbol)
 
                 if signal and time.time() - sent.get(symbol, 0) > 3600:
@@ -139,10 +114,10 @@ def run_bot():
                     sent[symbol] = time.time()
                     print(f"✅ sent: {symbol}", flush=True)
 
-                time.sleep(3)
+                time.sleep(2)
 
             print("🔥 يفحص السوق...", flush=True)
-            time.sleep(180)
+            time.sleep(120)
 
         except Exception as e:
             print(f"ERROR: {e}", flush=True)

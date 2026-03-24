@@ -32,7 +32,7 @@ def get_stocks():
     rows = soup.select("table.table-light tr")[1:]
 
     stocks = []
-    for row in rows[:10]:
+    for row in rows[:15]:
         cols = row.find_all("td")
         if len(cols) < 10:
             continue
@@ -47,29 +47,55 @@ def get_stocks():
     return stocks
 
 def run_bot():
-    print("🔥 BOT STARTED", flush=True)
+    print("🔥 ELITE BOT STARTED", flush=True)
 
     while True:
         try:
             stocks = get_stocks()
-            print("📊 DATA OK", flush=True)
 
             for s in stocks:
                 symbol, price, change, volume = s
 
-                if change > 3 and volume > 500000:
+                score = 0
+
+                # 🔥 فلترة ذكية
+                if change > 2:
+                    score += 1
+                if change > 4:
+                    score += 2
+                if volume > 500000:
+                    score += 1
+                if volume > 2000000:
+                    score += 2
+
+                # 🚨 إشارات قوية
+                if score >= 3:
                     if time.time() - sent.get(symbol, 0) > 3600:
-                        msg = f"""🚀 فرصة
+
+                        entry = price
+                        target1 = round(price * 1.03, 2)
+                        target2 = round(price * 1.06, 2)
+                        stop = round(price * 0.97, 2)
+
+                        msg = f"""🚨 إشارة نخبة
 
 📊 {symbol}
-💰 {price}
-⚡ {change}%
-📈 Vol: {volume}
+⭐ التقييم: {score}/6
+
+💰 دخول: {entry}
+🛑 وقف: {stop}
+
+🎯 هدف1: {target1}
+🎯 هدف2: {target2}
+
+⚡ تغير: {change}%
+📈 حجم: {volume}
 """
+
                         send(msg)
                         sent[symbol] = time.time()
 
-            time.sleep(180)
+            time.sleep(120)
 
         except Exception as e:
             print(f"ERROR: {e}", flush=True)

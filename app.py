@@ -2,53 +2,62 @@ import os
 import time
 import threading
 import requests
-from flask import Flask
+from flask import Flask, request
 
 app = Flask(__name__)
 
-# ===== Environment Variables =====
+# ===== ENV =====
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 FINNHUB_API_KEY = (os.getenv("FINNHUB_API_KEY") or "").strip()
 
-# ===== Settings =====
+print("BOT_TOKEN:", bool(BOT_TOKEN), flush=True)
+print("CHAT_ID:", bool(CHAT_ID), flush=True)
+print("FINNHUB:", bool(FINNHUB_API_KEY), flush=True)
+
+# ===== SETTINGS =====
 WATCHLIST = ["TSLA", "NVDA", "AMD", "PLTR", "SOFI", "NIO"]
 ALERT_COOLDOWN = 20 * 60
 SCAN_INTERVAL = 60
-
 last_alert = {}
-last_update_id = 0
 
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
-})
-
-# ===== Telegram =====
-def tg_api(method, data=None, timeout=15):
-    if not BOT_TOKEN:
-        print("Missing BOT_TOKEN", flush=True)
-        return None
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    try:
-        r = session.post(url, data=data, timeout=timeout)
-        return r.json()
-    except Exception as e:
-        print(f"telegram api error: {e}", flush=True)
-        return None
-
+# ===== TELEGRAM =====
 def send(msg, chat_id=None):
-    target_chat = str(chat_id or CHAT_ID).strip()
-    if not target_chat:
-        print("Missing CHAT_ID", flush=True)
+    cid = str(chat_id or CHAT_ID).strip()
+    if not BOT_TOKEN or not cid:
+        print("Missing BOT_TOKEN or CHAT_ID", flush=True)
         return
 
-    tg_api("sendMessage", {"chat_id": target_chat, "text": msg})
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(url, data={"chat_id": cid, "text": msg}, timeout=10)
+    except Exception as e:
+        print("send error:", e, flush=True)
 
-# ===== Finnhub =====
-def get_finnhub_quote(symbol):
+# ===== COMMANDS =====
+def handle_command(text, chat_id):
+    text = (text or "").lower().strip()
+
+    if text == "/start":
+        send(
+            "🚀 البوت جاهز\n\n"
+            "/status - حالة البوت\n"
+            "/watchlist - الأسهم\n"
+            "/test - اختبار",
+            chat_id
+        )
+
+    elif text == "/status":
+        send("✅ البوت شغال 100%", chat_id)
+
+    elif text == "/watchlist":
+        send("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
+
+    elif text == "/test":
+        send("🔥 تم الاختبار بنجاح", chat_id)
+
+# ===== FINNHUB =====
+def get_price(symbol):
     if not FINNHUB_API_KEY:
         print("Missing FINNHUB_API_KEY", flush=True)
         return None
@@ -56,7 +65,7 @@ def get_finnhub_quote(symbol):
     try:
         url = "https://finnhub.io/api/v1/quote"
         params = {"symbol": symbol, "token": FINNHUB_API_KEY}
-        r = session.get(url, params=params, timeout=12)
+        r = requests.get(url, params=params, timeout=10)
 
         if r.status_code != 200:
             print(f"finnhub status error {symbol}: {r.status_code}", flush=True)
@@ -66,83 +75,21 @@ def get_finnhub_quote(symbol):
 
         price = data.get("c")
         change = data.get("dp")
-        day_high = data.get("h")
 
         if price in (None, 0) or change is None:
             return None
 
         return {
             "price": float(price),
-            "change": float(change),
-            "day_high": float(day_high) if day_high not in (None, 0) else None,
+            "change": float(change)
         }
-
     except Exception as e:
         print(f"finnhub error {symbol}: {e}", flush=True)
         return None
 
-# ===== Signal Logic =====
-def build_signal(symbol, d):
-    price = d.get("price")
-    change = d.get("change")
-    day_high = d.get("day_high")
-
-    if price is None or change is None:
-        return None
-
-    score = 0
-    reasons = []
-
-    if change > 2:
-        score += 3
-        reasons.append("تغير قوي")
-
-    if change > 4:
-        score += 2
-        reasons.append("زخم أعلى")
-
-    if price < 10:
-        score += 1
-        reasons.append("سعر مناسب للمضاربة")
-
-    if day_high not in (None, 0) and price >= day_high * 0.985:
-        score += 2
-        reasons.append("قريب من قمة اليوم")
-
-    if score < 5:
-        return None
-
-    entry = round(price, 2)
-    stop = round(entry * 0.96, 2)
-    t1 = round(entry * 1.04, 2)
-    t2 = round(entry * 1.07, 2)
-    t3 = round(entry * 1.10, 2)
-
-    reasons_text = " - ".join(reasons[:4]) if reasons else "زخم"
-
-    msg = f"""🚨 إشارة قوية
-
-📊 السهم: {symbol}
-⭐ التقييم: {score}/8
-
-💰 الدخول: {entry}
-🛑 الوقف: {stop}
-
-🎯 الهدف 1: {t1}
-🎯 الهدف 2: {t2}
-🎯 الهدف 3: {t3}
-
-⚡ التغير: {round(change, 2)}%"""
-
-    if day_high not in (None, 0):
-        msg += f"\n📍 قمة اليوم: {round(day_high, 2)}"
-
-    msg += f"\n\n✅ الأسباب: {reasons_text}"
-    return msg
-
-# ===== Market Bot =====
+# ===== MARKET BOT =====
 def market_bot():
-    print("🔥 FINNHUB BOT STARTED", flush=True)
+    print("🔥 MARKET BOT STARTED", flush=True)
 
     if BOT_TOKEN and CHAT_ID:
         send("🔥 البوت شغال على Finnhub")
@@ -150,112 +97,64 @@ def market_bot():
     while True:
         try:
             now = time.time()
-            print(f"📊 scanning {len(WATCHLIST)} stocks", flush=True)
+            print("📊 scanning...", flush=True)
 
             for symbol in WATCHLIST:
-                d = get_finnhub_quote(symbol)
+                d = get_price(symbol)
                 if not d:
                     time.sleep(1)
                     continue
 
-                signal = build_signal(symbol, d)
-                if signal:
-                    last_t = last_alert.get(symbol, 0)
-                    if now - last_t > ALERT_COOLDOWN:
-                        send(signal)
+                if d["change"] > 2:
+                    last = last_alert.get(symbol, 0)
+
+                    if now - last > ALERT_COOLDOWN:
+                        msg = f"""🚀 فرصة
+
+{symbol}
+السعر: {d['price']}
+التغير: {round(d['change'], 2)}%
+"""
+                        send(msg)
                         last_alert[symbol] = now
-                        print(f"✅ sent: {symbol}", flush=True)
+                        print("sent:", symbol, flush=True)
 
                 time.sleep(1)
 
-            print("🔥 يفحص السوق...", flush=True)
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
-            print(f"market bot error: {e}", flush=True)
-            time.sleep(20)
+            print("bot error:", e, flush=True)
+            time.sleep(10)
 
-# ===== Telegram Commands =====
-def handle_command(text, chat_id):
-    t = text.strip().lower()
+# ===== WEBHOOK =====
+@app.route("/telegram", methods=["POST"])
+def telegram():
+    data = request.get_json(silent=True)
 
-    if t == "/start":
-        send(
-            "🚀 البوت شغال\n\n"
-            "الأوامر:\n"
-            "/status - حالة البوت\n"
-            "/watchlist - قائمة الأسهم\n"
-            "/test - رسالة اختبار",
-            chat_id=chat_id
-        )
+    if not data:
+        return "ok", 200
 
-    elif t == "/status":
-        send(
-            f"✅ البوت يعمل\n"
-            f"📊 عدد الأسهم في القائمة: {len(WATCHLIST)}\n"
-            f"⏱️ مدة منع التكرار: {ALERT_COOLDOWN // 60} دقيقة\n"
-            f"🔁 الفحص كل: {SCAN_INTERVAL} ثانية",
-            chat_id=chat_id
-        )
-
-    elif t == "/watchlist":
-        send("📋 القائمة:\n" + "\n".join(WATCHLIST), chat_id=chat_id)
-
-    elif t == "/test":
-        send("🔥 اختبار البوت ناجح", chat_id=chat_id)
-
-# ===== Telegram Listener =====
-def telegram_listener():
-    global last_update_id
-    print("🤖 TELEGRAM LISTENER STARTED", flush=True)
-
-    while True:
-        try:
-            if not BOT_TOKEN:
-                time.sleep(5)
-                continue
-
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-            params = {"timeout": 20, "offset": last_update_id + 1}
-            r = session.get(url, params=params, timeout=30)
-            data = r.json()
-
-            if not data.get("ok"):
-                time.sleep(3)
-                continue
-
-            for upd in data.get("result", []):
-    last_update_id = upd["update_id"]
-
-    message = upd.get("message")
-    if not message:
-        continue
-
+    message = data.get("message", {})
     text = message.get("text")
     chat_id = message.get("chat", {}).get("id")
 
-    if text:
-        print(f"📩 Received: {text}", flush=True)
+    if text and chat_id:
+        print("📩", text, flush=True)
         handle_command(text, chat_id)
 
-        except Exception as e:
-            print(f"telegram listener error: {e}", flush=True)
-            time.sleep(5)
+    return "ok", 200
 
-# ===== Flask Routes =====
+# ===== ROOT =====
 @app.route("/", methods=["GET", "POST"])
 def home():
-    return "OK"
+    return "OK", 200
 
-# ===== Main =====
+# ===== MAIN =====
 if __name__ == "__main__":
-    print("🔥 STARTING BOT...", flush=True)
-    print("BOT_TOKEN loaded:", bool(BOT_TOKEN), flush=True)
-    print("CHAT_ID loaded:", bool(CHAT_ID), flush=True)
-    print("FINNHUB_API_KEY loaded:", bool(FINNHUB_API_KEY), flush=True)
+    print("🔥 STARTING...", flush=True)
 
     threading.Thread(target=market_bot, daemon=True).start()
-    threading.Thread(target=telegram_listener, daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    app.run(host="0.0.0.0", port=port)

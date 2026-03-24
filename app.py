@@ -29,22 +29,23 @@ WATCHLIST = [
 # =========================
 # إعدادات البوت
 # =========================
-CHECK_INTERVAL_SECONDS = 12          # سرعة الفحص
-COOLDOWN_SECONDS = 1800              # منع تكرار نفس السهم 30 دقيقة
-MIN_LIQUIDITY = 150000               # أقل سيولة بالدولار في آخر دقيقة
-MIN_RVOL = 2.0                       # أقل RVOL
-MIN_PRICE_CHANGE_5M = 1.2            # أقل تغير خلال آخر 5 دقائق %
-BREAKOUT_LOOKBACK = 20               # اختراق أعلى هاي آخر 20 شمعة
-NEAR_BREAKOUT_BUFFER = 0.995         # قريب من الاختراق حتى قبل الانفجار
+CHECK_INTERVAL_SECONDS = 20      # سرعة الفحص
+COOLDOWN_SECONDS = 2700          # 45 دقيقة منع تكرار نفس السهم
+MIN_LIQUIDITY = 120000           # أقل سيولة بالدولار
+MIN_RVOL = 1.8                   # أقل RVOL
+MIN_PRICE_CHANGE_5M = 1.0        # أقل تغير 5 دقائق
+BREAKOUT_LOOKBACK = 20
+NEAR_BREAKOUT_BUFFER = 0.995     # قريب من الاختراق
+MIN_SCORE = 6                    # أقل نقاط للإشارة
 
-# الربح/الخسارة
-STOP_LOSS_PCT = 0.04                 # 4%
-TARGET1_PCT = 0.04                   # 4%
-TARGET2_PCT = 0.07                   # 7%
-TARGET3_PCT = 0.10                   # 10%
+# إدارة الصفقة
+STOP_LOSS_PCT = 0.04
+TARGET1_PCT = 0.04
+TARGET2_PCT = 0.07
+TARGET3_PCT = 0.10
 
 # =========================
-# متغيرات داخلية
+# متغيرات
 # =========================
 sent_start = False
 last_sent = {}
@@ -64,14 +65,14 @@ def send_telegram(message: str):
         print(f"Telegram error: {e}", flush=True)
 
 # =========================
-# Flask route
+# Route
 # =========================
 @app.route("/", methods=["GET", "POST"])
 def home():
-    return "Pro Trading Bot is running"
+    return "Elite Trading Bot Running"
 
 # =========================
-# أدوات مساعدة
+# Helpers
 # =========================
 def format_money(value: float) -> str:
     if value >= 1_000_000:
@@ -109,25 +110,22 @@ def get_data(symbol: str, interval: str, period: str = "1d") -> pd.DataFrame:
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # متوسطات
     df["EMA9"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
-    # متوسط الحجم و RVOL
     df["AVG_VOL20"] = df["Volume"].rolling(20).mean()
     df["RVOL"] = df["Volume"] / df["AVG_VOL20"]
 
-    # VWAP
     typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
     cumulative_tpv = (typical_price * df["Volume"]).cumsum()
-    cumulative_vol = df["Volume"].cumsum()
-    df["VWAP"] = cumulative_tpv / cumulative_vol.replace(0, pd.NA)
+    cumulative_vol = df["Volume"].cumsum().replace(0, pd.NA)
+    df["VWAP"] = cumulative_tpv / cumulative_vol
 
     return df
 
 # =========================
-# منطق الإشارة الاحترافي
+# منطق الإشارة
 # =========================
 def check_signal(symbol: str):
     df1 = get_data(symbol, "1m")
@@ -149,82 +147,104 @@ def check_signal(symbol: str):
         last5 = df5.iloc[-1]
         last15 = df15.iloc[-1]
 
-        # أسعار أساسية
         price = float(last1["Close"])
+        open1 = float(last1["Open"])
+        high1 = float(last1["High"])
+        low1 = float(last1["Low"])
+
         prev_5m_price = float(df1["Close"].iloc[-6]) if len(df1) >= 6 else price
         price_change_5m = ((price - prev_5m_price) / prev_5m_price) * 100 if prev_5m_price else 0
 
-        # اتجاه
-        trend_1m = price > float(last1["EMA9"]) > float(last1["EMA20"])
-        trend_5m = float(last5["Close"]) > float(last5["EMA20"])
-        trend_15m = float(last15["Close"]) > float(last15["EMA20"])
+        ema9 = float(last1["EMA9"])
+        ema20 = float(last1["EMA20"])
+        ema50 = float(last1["EMA50"])
 
-        # فوق VWAP
-        above_vwap = price > float(last1["VWAP"])
+        close5 = float(last5["Close"])
+        ema20_5 = float(last5["EMA20"])
 
-        # سيولة
+        close15 = float(last15["Close"])
+        ema20_15 = float(last15["EMA20"])
+
+        vwap = float(last1["VWAP"]) if pd.notna(last1["VWAP"]) else 0.0
         volume_1m = float(last1["Volume"])
         liquidity = price * volume_1m
 
-        # RVOL
         rvol = float(last1["RVOL"]) if pd.notna(last1["RVOL"]) else 0.0
 
-        # اختراق أو قريب من الاختراق
         breakout_level = float(df5["High"].iloc[-BREAKOUT_LOOKBACK:-1].max())
         breakout_now = price > breakout_level
         near_breakout = price >= breakout_level * NEAR_BREAKOUT_BUFFER
 
-        # زخم مبكر
-        ema_stack = float(last1["EMA9"]) > float(last1["EMA20"]) > float(last1["EMA50"])
-        strong_candle = (
-            float(last1["Close"]) > float(last1["Open"]) and
-            (float(last1["Close"]) - float(last1["Low"])) > (float(last1["High"]) - float(last1["Close"]))
-        )
+        trend_1m = price > ema9 > ema20
+        trend_5m = close5 > ema20_5
+        trend_15m = close15 > ema20_15
+        above_vwap = price > vwap if vwap > 0 else False
+        ema_stack = ema9 > ema20 > ema50
 
-        # فلتر احترافي
-        pre_explosion_setup = (
-            near_breakout and
-            price_change_5m >= MIN_PRICE_CHANGE_5M and
-            liquidity >= MIN_LIQUIDITY and
-            rvol >= MIN_RVOL and
-            trend_1m and
-            trend_5m and
-            trend_15m and
-            above_vwap and
-            ema_stack
-        )
+        strong_candle = (price > open1) and ((price - low1) >= (high1 - price))
+        volume_ok = liquidity >= MIN_LIQUIDITY
+        rvol_ok = rvol >= MIN_RVOL
+        momentum_ok = price_change_5m >= MIN_PRICE_CHANGE_5M
 
-        confirmed_breakout = (
-            breakout_now and
-            liquidity >= MIN_LIQUIDITY and
-            rvol >= MIN_RVOL and
-            trend_1m and
-            trend_5m and
-            trend_15m and
-            above_vwap and
-            strong_candle
-        )
+        # نظام نقاط
+        score = 0
+        reasons = []
 
-        if not (pre_explosion_setup or confirmed_breakout):
+        if near_breakout:
+            score += 2
+            reasons.append("قريب من الاختراق")
+        if breakout_now:
+            score += 2
+            reasons.append("اختراق مؤكد")
+        if trend_1m:
+            score += 1
+            reasons.append("اتجاه 1m")
+        if trend_5m:
+            score += 1
+            reasons.append("اتجاه 5m")
+        if trend_15m:
+            score += 1
+            reasons.append("اتجاه 15m")
+        if above_vwap:
+            score += 1
+            reasons.append("فوق VWAP")
+        if ema_stack:
+            score += 1
+            reasons.append("EMA stack")
+        if volume_ok:
+            score += 1
+            reasons.append("سيولة قوية")
+        if rvol_ok:
+            score += 1
+            reasons.append("RVOL قوي")
+        if momentum_ok:
+            score += 1
+            reasons.append("زخم 5m")
+        if strong_candle:
+            score += 1
+            reasons.append("شمعة قوية")
+
+        if score < MIN_SCORE:
             return None
 
-        signal_type = "قبل الانفجار" if pre_explosion_setup and not breakout_now else "اختراق مؤكد"
+        signal_type = "قبل الانفجار" if near_breakout and not breakout_now else "اختراق مؤكد"
 
-        # إدارة الصفقة
         entry = round(price, 2)
         stop = round(entry * (1 - STOP_LOSS_PCT), 2)
         target1 = round(entry * (1 + TARGET1_PCT), 2)
         target2 = round(entry * (1 + TARGET2_PCT), 2)
         target3 = round(entry * (1 + TARGET3_PCT), 2)
 
-        # نص فني
-        message = f"""🚨 إشارة احترافية
+        reasons_text = " - ".join(reasons[:5])
+
+        message = f"""🚨 إشارة نخبة
 
 📊 السهم: {symbol}
 🧠 النوع: {signal_type}
+⭐ التقييم: {score}/11
 
 💰 الدخول: {entry}
-🛑 وقف الخسارة: {stop}
+🛑 الوقف: {stop}
 
 🎯 الهدف 1: {target1}
 🎯 الهدف 2: {target2}
@@ -235,12 +255,8 @@ def check_signal(symbol: str):
 ⚡ تغير 5 دقائق: {price_change_5m:.2f}%
 📍 مستوى الاختراق: {breakout_level:.2f}
 
-✅ الشروط:
-- فوق VWAP
-- فوق EMA 9 / 20 / 50
-- سيولة قوية
-- زخم صاعد
-- تأكيد 5m و 15m
+✅ أهم الأسباب:
+{reasons_text}
 """
         return message
 
@@ -249,13 +265,13 @@ def check_signal(symbol: str):
         return None
 
 # =========================
-# حلقة البوت
+# Bot loop
 # =========================
 def bot_loop():
     global sent_start
 
     if not sent_start:
-        send_telegram("🚀 البوت الاحترافي بدأ يفحص السوق")
+        send_telegram("🚀 بوت النخبة بدأ يفحص السوق")
         sent_start = True
 
     while True:
@@ -272,7 +288,6 @@ def bot_loop():
                         last_sent[symbol] = now_ts
                         print(f"Signal sent: {symbol}", flush=True)
 
-            print("🔥 يفحص السوق...", flush=True)
             time.sleep(CHECK_INTERVAL_SECONDS)
 
         except Exception as e:
@@ -280,7 +295,7 @@ def bot_loop():
             time.sleep(CHECK_INTERVAL_SECONDS)
 
 # =========================
-# تشغيل
+# Run
 # =========================
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()

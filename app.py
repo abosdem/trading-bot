@@ -43,7 +43,7 @@ def handle_command(text, chat_id):
 
     if text == "/start":
         send(
-            "🚀 البوت الدقيق جاهز\n\n"
+            "🚀 البوت B+ جاهز\n\n"
             "/status - حالة البوت\n"
             "/watchlist - الأسهم\n"
             "/test - اختبار",
@@ -51,7 +51,7 @@ def handle_command(text, chat_id):
         )
 
     elif text == "/status":
-        send("✅ البوت يعمل بنسخة B الدقيقة", chat_id)
+        send("✅ البوت يعمل بنسخة B+ فلتر اختراق حقيقي", chat_id)
 
     elif text == "/watchlist":
         send("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
@@ -80,6 +80,7 @@ def get_quote(symbol):
         day_high = data.get("h")
         day_low = data.get("l")
         prev_close = data.get("pc")
+        open_price = data.get("o")
 
         if price in (None, 0) or change is None or prev_close in (None, 0):
             return None
@@ -90,6 +91,7 @@ def get_quote(symbol):
             "day_high": float(day_high) if day_high not in (None, 0) else None,
             "day_low": float(day_low) if day_low not in (None, 0) else None,
             "prev_close": float(prev_close),
+            "open_price": float(open_price) if open_price not in (None, 0) else None,
         }
 
     except Exception as e:
@@ -102,61 +104,73 @@ def build_signal(symbol, d):
     day_high = d["day_high"]
     day_low = d["day_low"]
     prev_close = d["prev_close"]
+    open_price = d["open_price"]
 
+    # فلترة أولية
     if price < 0.50:
         return None
 
-    if change < 2.5:
+    if change < 3:
         return None
 
     if change > 18:
         return None
 
-    if not day_high or not day_low:
+    if not day_high or not day_low or not open_price:
         return None
 
     day_range = day_high - day_low
     if day_range <= 0:
         return None
 
-    near_high = price >= day_high * 0.997
+    # 1) اختراق حقيقي: السعر لازم يكون فوق افتتاح اليوم
+    if price <= open_price:
+        return None
+
+    # 2) لا نريد مجرد ارتداد من قاع بعيد عن المقاومة
+    recovery_ratio = (price - day_low) / day_range
+    if recovery_ratio < 0.80:
+        return None
+
+    # 3) لازم يكون عند المقاومة تقريباً أو كاسرها
+    near_high = price >= day_high * 0.998
     if not near_high:
         return None
 
-    recovery_from_low = (price - day_low) / day_range
-    if recovery_from_low < 0.75:
+    # 4) منع الأسهم الهابطة يومياً رغم الارتداد
+    if price <= prev_close * 1.03:
         return None
 
-    green_from_prev_close = price > prev_close
-    if not green_from_prev_close:
+    # 5) فلترة أسهم مضاربية مناسبة فقط
+    if price > 20:
         return None
 
     score = 0
     reasons = []
 
-    if change >= 2.5:
+    if change >= 3:
         score += 2
-        reasons.append("زخم نظيف")
-
-    if change >= 4:
-        score += 1
         reasons.append("زخم قوي")
 
-    if price < 10:
+    if change >= 5:
+        score += 1
+        reasons.append("اندفاع واضح")
+
+    if 0.5 <= price <= 10:
         score += 1
         reasons.append("سعر مضاربي")
 
     if near_high:
         score += 2
-        reasons.append("قريب جدًا من قمة اليوم")
+        reasons.append("عند قمة اليوم")
 
-    if recovery_from_low >= 0.85:
+    if recovery_ratio >= 0.90:
         score += 1
         reasons.append("سيطرة مشترين")
 
-    if 1 <= price <= 8:
+    if price > open_price:
         score += 1
-        reasons.append("مدى مناسب")
+        reasons.append("فوق الافتتاح")
 
     if score < 6:
         return None
@@ -164,12 +178,12 @@ def build_signal(symbol, d):
     entry = round(price, 2)
     stop = round(entry * 0.97, 2)
     t1 = round(entry * 1.04, 2)
-    t2 = round(entry * 1.07, 2)
-    t3 = round(entry * 1.10, 2)
+    t2 = round(entry * 1.08, 2)
+    t3 = round(entry * 1.12, 2)
 
     reasons_text = " - ".join(reasons[:4])
 
-    return f"""🚨 إشارة B دقيقة
+    return f"""🚨 اختراق حقيقي
 
 📊 السهم: {symbol}
 ⭐ التقييم: {score}/8
@@ -184,19 +198,20 @@ def build_signal(symbol, d):
 ⚡ التغير: {round(change, 2)}%
 📍 قمة اليوم: {round(day_high, 2)}
 📍 قاع اليوم: {round(day_low, 2)}
+📍 الافتتاح: {round(open_price, 2)}
 
 ✅ الأسباب: {reasons_text}"""
 
 def market_bot():
-    print("🔥 B BOT STARTED", flush=True)
+    print("🔥 B+ BOT STARTED", flush=True)
 
     if BOT_TOKEN and CHAT_ID:
-        send("🔥 البوت B الدقيق شغال")
+        send("🔥 البوت B+ شغال")
 
     while True:
         try:
             now = time.time()
-            print("📊 scanning B...", flush=True)
+            print("📊 scanning B+...", flush=True)
 
             for symbol in WATCHLIST:
                 d = get_quote(symbol)
@@ -242,7 +257,7 @@ def home():
     return "OK", 200
 
 if __name__ == "__main__":
-    print("🔥 STARTING B...", flush=True)
+    print("🔥 STARTING B+...", flush=True)
     print("BOT_TOKEN:", bool(BOT_TOKEN), flush=True)
     print("CHAT_ID:", bool(CHAT_ID), flush=True)
     print("FINNHUB:", bool(FINNHUB_API_KEY), flush=True)

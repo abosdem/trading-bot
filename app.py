@@ -1,157 +1,71 @@
 import requests
 import time
-import threading
-import os
-from bs4 import BeautifulSoup
 from flask import Flask
-
-BOT_TOKEN = os.environ.get("8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo")
-CHAT_ID = os.environ.get("912977673")
+import threading
 
 app = Flask(__name__)
-sent = set()
 
-# ===== Telegram =====
+BOT_TOKEN = "8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo"
+CHAT_ID = "912977673"
+
 def send(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
-# ===== Finviz =====
-def get_stocks():
-    url = "https://finviz.com/screener.ashx?v=111&f=sh_price_u10,sh_avgvol_o500,sh_relvol_o2,sh_float_u20"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    tickers = []
-    for a in soup.find_all("a"):
-        href = a.get("href", "")
-        if "quote.ashx?t=" in href:
-            t = a.text.strip()
-            if t.isupper() and len(t) <= 5:
-                tickers.append(t)
-
-    return list(set(tickers))[:20]
-
-# ===== بيانات مباشرة =====
-def get_data(symbol):
+def get_price(symbol):
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         r = requests.get(url).json()
-
-        result = r["chart"]["result"][0]
-        close = result["indicators"]["quote"][0]["close"]
-        volume = result["indicators"]["quote"][0]["volume"]
-
-        if not close or len(close) < 5:
-            return None
-
-        price = close[-1]
-        prev = close[-2]
-
-        vol = volume[-1]
-        avg_vol = sum(volume[-20:]) / 20 if len(volume) >= 20 else 0
-
-        if avg_vol == 0:
-            return None
-
-        rvol = vol / avg_vol
-        change = ((price - prev) / prev) * 100
-
-        return price, rvol, change, vol
-
+        return r["chart"]["result"][0]["meta"]["regularMarketPrice"]
     except:
         return None
 
-# ===== تحليل =====
-def analyze(symbol):
-    data = get_data(symbol)
-    if not data:
-        return None
-
-    price, rvol, change, volume = data
-
-    score = 0
-    if rvol > 2: score += 3
-    if change > 1: score += 2
-    if volume > 500000: score += 3
-
-    if score < 5:
-        return None
-
-    entry = round(price, 2)
-    stop = round(price * 0.96, 2)
-
-    tp1 = round(price * 1.05, 2)
-    tp2 = round(price * 1.08, 2)
-    tp3 = round(price * 1.10, 2)
-
-    liquidity = int(price * volume)
-
-    return {
-        "symbol": symbol,
-        "entry": entry,
-        "stop": stop,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "rvol": round(rvol, 2),
-        "change": round(change, 2),
-        "liq": liquidity,
-        "score": score
-    }
-
-# ===== البوت =====
-def bot():
-    send("🔥 الوحش الاحترافي بدأ")
+def scan():
+    symbols = ["NIO","TPET","YYAI","ASNS","SOWG","VEEE","ACXP","AAGR","IMPP"]
 
     while True:
-        try:
-            stocks = get_stocks()
+        print("🔥 يفحص السوق...")
+        for s in symbols:
+            price = get_price(s)
+            if not price:
+                continue
 
-            for s in stocks:
-                res = analyze(s)
+            entry = price
+            stop = round(entry * 0.96, 2)
+            t1 = round(entry * 1.03, 2)
+            t2 = round(entry * 1.07, 2)
+            t3 = round(entry * 1.10, 2)
 
-                if res and s not in sent:
-                    sent.add(s)
+            msg = f"""🚨 إشارة نخبة
 
-                    msg = f"""
-🚨 إشارة نخبة
+📊 السهم: {s}
+💰 الدخول: {entry}
 
-📊 {res['symbol']}
-⭐ {res['score']}/10
+🛑 الوقف: {stop}
 
-💰 دخول: {res['entry']}
-🛑 وقف: {res['stop']}
+🎯 الهدف 1: {t1}
+🎯 الهدف 2: {t2}
+🎯 الهدف 3: {t3}
 
-🎯 1: {res['tp1']}
-🎯 2: {res['tp2']}
-🎯 3: {res['tp3']}
-
-💧 {res['liq']:,}$
-📈 RVOL {res['rvol']}
-⚡ {res['change']}%
-
-🔥 زخم + سيولة
+🔥 فرصة محتملة
 """
-                    send(msg)
-                    print("Signal:", s)
+            send(msg)
+            print("✅ أرسل:", s)
 
-                time.sleep(1)
+            time.sleep(2)
 
-            time.sleep(60)
+        time.sleep(60)
 
-        except Exception as e:
-            print("ERR:", e)
-            time.sleep(30)
-
-# ===== Flask =====
-@app.route("/")
+@app.route('/')
 def home():
-    return "🔥 PRO BOT RUNNING"
+    return "BOT RUNNING 🔥"
 
-# ===== تشغيل =====
+def run_bot():
+    scan()
+
+threading.Thread(target=run_bot).start()
+
 if __name__ == "__main__":
-    threading.Thread(target=bot, daemon=True).start()
+    import os
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

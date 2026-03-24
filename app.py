@@ -11,62 +11,47 @@ app = Flask(__name__)
 BOT_TOKEN = "8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo"
 CHAT_ID = "912977673"
 
-FMP_API = "demo"  # غيره لاحقًا لو تبغى قوة أعلى
+CHECK_INTERVAL = 20
+COOLDOWN = 2700
 
-CHECK_INTERVAL = 15
-COOLDOWN = 1800
-
-MIN_PRICE = 0.2
+MIN_PRICE = 0.5
 MAX_PRICE = 10
 
-MIN_LIQ = 200000
-MIN_RVOL = 2.0
-MIN_CHANGE = 1.5
+MIN_LIQ = 300000
+MIN_RVOL = 2.5
+MIN_CHANGE = 2.0
 
 sent = {}
 
 # =========================
 def send(msg):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=10
-        )
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                      data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
     except:
         pass
 
 @app.route("/")
 def home():
-    return "ELITE BOT RUNNING"
+    return "ELITE MODE"
 
 # =========================
-# جلب الأسهم القوية
-# =========================
-def get_stocks():
+def get_elite_stocks():
     try:
-        url = f"https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey={FMP_API}"
+        url = "https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey=demo"
         data = requests.get(url, timeout=10).json()
-        return [x["symbol"] for x in data if MIN_PRICE <= x.get("price", 0) <= MAX_PRICE][:40]
+
+        stocks = []
+        for x in data:
+            price = x.get("price", 0)
+            change = x.get("changesPercentage", 0)
+
+            if MIN_PRICE <= price <= MAX_PRICE and change > 3:
+                stocks.append(x["symbol"])
+
+        return stocks[:25]
     except:
         return []
-
-# =========================
-# جلب الأخبار
-# =========================
-def get_news(symbol):
-    try:
-        url = f"https://financialmodelingprep.com/api/v3/stock_news?tickers={symbol}&limit=3&apikey={FMP_API}"
-        data = requests.get(url, timeout=10).json()
-
-        if not data:
-            return "لا يوجد خبر"
-
-        titles = [x["title"] for x in data[:2]]
-        return " | ".join(titles)
-
-    except:
-        return "لا يوجد خبر"
 
 # =========================
 def get(symbol, tf):
@@ -138,9 +123,7 @@ def signal(sym):
         return None
 
     breakout = float(d5["High"].iloc[-20:-1].max())
-    near = price >= breakout * 0.995
-
-    if not near:
+    if price < breakout * 0.995:
         return None
 
     ema9 = float(l["ema9"])
@@ -159,8 +142,6 @@ def signal(sym):
     if pd.isna(l["vwap"]) or price < float(l["vwap"]):
         return None
 
-    news = get_news(sym)
-
     entry = round(price, 2)
     stop = round(entry * 0.96, 2)
 
@@ -168,32 +149,29 @@ def signal(sym):
     t2 = round(entry * 1.07, 2)
     t3 = round(entry * 1.10, 2)
 
-    return f"""🚨 إشارة النخبة القصوى
+    return f"""💰 إشارة نخبة قوية
 
-📊 {sym}
+{sym}
 
-💰 دخول: {entry}
-🛑 وقف: {stop}
+دخول: {entry}
+وقف: {stop}
 
-🎯 هدف1: {t1}
-🎯 هدف2: {t2}
-🎯 هدف3: {t3}
+هدف1: {t1}
+هدف2: {t2}
+هدف3: {t3}
 
-💧 سيولة: {round(liq/1000,1)}K
-📈 RVOL: {round(rvol,2)}
-⚡ 5m: {round(change,2)}%
-
-📰 الخبر:
-{news}
+سيولة: {round(liq/1000,1)}K
+RVOL: {round(rvol,2)}
+5m: {round(change,2)}%
 """
 
 # =========================
 def loop():
-    send("🔥 الوحش النهائي بدأ")
+    send("🔥 وضع النخبة بدأ")
 
     while True:
         try:
-            stocks = get_stocks()
+            stocks = get_elite_stocks()
 
             for s in stocks:
                 sig = signal(s)

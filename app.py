@@ -1,71 +1,158 @@
-import requests
+import os
 import time
-from flask import Flask
 import threading
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask
 
 app = Flask(__name__)
 
-BOT_TOKEN = "8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo"
-CHAT_ID = "912977673"
+BOT_TOKEN = os.environ.get("8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo")
+CHAT_ID = os.environ.get("912977673")
 
-def send(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+CHECK_INTERVAL = 120
+COOLDOWN = 3600
 
-def get_price(symbol):
+sent = {}
+
+def send(msg: str):
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        r = requests.get(url).json()
-        return r["chart"]["result"][0]["meta"]["regularMarketPrice"]
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg},
+            timeout=10
+        )
+    except:
+        pass
+
+def get_finviz_stocks():
+    try:
+        url = "https://finviz.com/screener.ashx?v=111&f=geo_usa,sh_price_u10,sh_avgvol_o500,sh_relvol_o2,sh_float_u20"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        out = []
+        for a in soup.find_all("a"):
+            href = a.get("href", "")
+            if "quote.ashx?t=" in href:
+                t = a.text.strip().upper()
+                if t.isalpha() and 1 <= len(t) <= 5 and t not in out:
+                    out.append(t)
+
+        return out[:20]
+    except:
+        return []
+
+def get_quote(symbol):
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
+        r = requests.get(url, timeout=15).json()
+        result = r["chart"]["result"][0]
+        quote = result["indicators"]["quote"][0]
+
+        closes = quote["close"]
+        highs = quote["high"]
+        volumes = quote["volume"]
+
+        closes = [x for x in closes if x is not None]
+        highs = [x for x in highs if x is not None]
+        volumes = [x for x in volumes if x is not None]
+
+        if len(closes) < 20 or len(highs) < 20 or len(volumes) < 20:
+            return None
+
+        price = float(closes[-1])
+        prev = float(closes[-2])
+        breakout = max(highs[-20:-1])
+        vol = float(volumes[-1])
+        avg_vol = sum(volumes[-20:]) / 20
+
+        if avg_vol <= 0:
+            return None
+
+        change = ((price - prev) / prev) * 100 if prev else 0
+        rvol = vol / avg_vol
+        liq = price * vol
+
+        return {
+            "price": round(price, 2),
+            "change": round(change, 2),
+            "rvol": round(rvol, 2),
+            "liq": int(liq),
+            "breakout": round(float(breakout), 2),
+            "near_breakout": price >= breakout * 0.995,
+            "vol": int(vol)
+        }
     except:
         return None
 
-def scan():
-    symbols = ["NIO","TPET","YYAI","ASNS","SOWG","VEEE","ACXP","AAGR","IMPP"]
+def analyze(symbol):
+    q = get_quote(symbol)
+    if not q:
+        return None
 
-    while True:
-        print("🔥 يفحص السوق...")
-        for s in symbols:
-            price = get_price(s)
-            if not price:
-                continue
+    score = 0
 
-            entry = price
-            stop = round(entry * 0.96, 2)
-            t1 = round(entry * 1.03, 2)
-            t2 = round(entry * 1.07, 2)
-            t3 = round(entry * 1.10, 2)
+    if q["rvol"] >= 2:
+        score += 3
+    if q["change"] >= 1:
+        score += 2
+    if q["near_breakout"]:
+        score += 3
+    if q["vol"] >= 500000:
+        score += 2
 
-            msg = f"""🚨 إشارة نخبة
+    if score < 6:
+        return None
 
-📊 السهم: {s}
+    entry = q["price"]
+    stop = round(entry * 0.96, 2)
+    t1 = round(entry * 1.04, 2)
+    t2 = round(entry * 1.07, 2)
+    t3 = round(entry * 1.10, 2)
+
+    return f"""🚨 إشارة وحش
+
+📊 السهم: {symbol}
+⭐ التقييم: {score}/10
+
 💰 الدخول: {entry}
-
 🛑 الوقف: {stop}
 
 🎯 الهدف 1: {t1}
 🎯 الهدف 2: {t2}
 🎯 الهدف 3: {t3}
 
-🔥 فرصة محتملة
+💧 السيولة: {q['liq']:,}$
+📈 RVOL: {q['rvol']}
+⚡ تغير 5 دقائق: {q['change']}%
+📍 مستوى الاختراق: {q['breakout']}
 """
-            send(msg)
-            print("✅ أرسل:", s)
 
-            time.sleep(2)
+def bot_loop():
+    send("🔥 الوحش بدأ")
 
-        time.sleep(60)
+    while True:
+        try:
+            stocks = get_finviz_stocks()
 
-@app.route('/')
+            for s in stocks:
+                sig = analyze(s)
+                if sig and time.time() - sent.get(s, 0) > COOLDOWN:
+                    send(sig)
+                    sent[s] = time.time()
+                time.sleep(1)
+
+            time.sleep(CHECK_INTERVAL)
+        except:
+            time.sleep(30)
+
+@app.route("/", methods=["GET", "POST"])
 def home():
-    return "BOT RUNNING 🔥"
-
-def run_bot():
-    scan()
-
-threading.Thread(target=run_bot).start()
+    return "ELITE BOT RUNNING"
 
 if __name__ == "__main__":
-    import os
+    threading.Thread(target=bot_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

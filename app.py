@@ -29,14 +29,14 @@ WATCHLIST = [
 # =========================
 # إعدادات البوت
 # =========================
-CHECK_INTERVAL_SECONDS = 20      # سرعة الفحص
-COOLDOWN_SECONDS = 2700          # 45 دقيقة منع تكرار نفس السهم
+CHECK_INTERVAL_SECONDS = 20
+COOLDOWN_SECONDS = 2700          # 45 دقيقة
 MIN_LIQUIDITY = 120000           # أقل سيولة بالدولار
-MIN_RVOL = 1.8                   # أقل RVOL
-MIN_PRICE_CHANGE_5M = 1.0        # أقل تغير 5 دقائق
+MIN_RVOL = 1.8
+MIN_PRICE_CHANGE_5M = 1.0
 BREAKOUT_LOOKBACK = 20
-NEAR_BREAKOUT_BUFFER = 0.995     # قريب من الاختراق
-MIN_SCORE = 6                    # أقل نقاط للإشارة
+NEAR_BREAKOUT_BUFFER = 0.995
+MIN_SCORE = 6
 
 # إدارة الصفقة
 STOP_LOSS_PCT = 0.04
@@ -44,9 +44,6 @@ TARGET1_PCT = 0.04
 TARGET2_PCT = 0.07
 TARGET3_PCT = 0.10
 
-# =========================
-# متغيرات
-# =========================
 sent_start = False
 last_sent = {}
 
@@ -97,12 +94,21 @@ def get_data(symbol: str, interval: str, period: str = "1d") -> pd.DataFrame:
             threads=False,
             prepost=True
         )
+
         if df is None or df.empty:
             return pd.DataFrame()
 
         df = flatten_columns(df)
         df = df.dropna().copy()
+
+        numeric_cols = ["Open", "High", "Low", "Close", "Volume"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna()
         return df
+
     except Exception as e:
         print(f"Data error {symbol} {interval}: {e}", flush=True)
         return pd.DataFrame()
@@ -147,14 +153,27 @@ def check_signal(symbol: str):
         last5 = df5.iloc[-1]
         last15 = df15.iloc[-1]
 
+        # ===== السعر الحالي =====
         price = float(last1["Close"])
         open1 = float(last1["Open"])
         high1 = float(last1["High"])
         low1 = float(last1["Low"])
 
-        prev_5m_price = float(df1["Close"].iloc[-6]) if len(df1) >= 6 else price
-        price_change_5m = ((price - prev_5m_price) / prev_5m_price) * 100 if prev_5m_price else 0
+        if price <= 0:
+            return None
 
+        # ===== تغير آخر 5 دقائق =====
+        prev_5m_price = float(df1["Close"].iloc[-6]) if len(df1) >= 6 else price
+        if prev_5m_price <= 0:
+            return None
+
+        price_change_5m = ((price - prev_5m_price) / prev_5m_price) * 100
+
+        # تجاهل الإشارات إذا التغير صفر أو سالب أو NaN
+        if pd.isna(price_change_5m) or price_change_5m <= 0:
+            return None
+
+        # ===== EMA =====
         ema9 = float(last1["EMA9"])
         ema20 = float(last1["EMA20"])
         ema50 = float(last1["EMA50"])
@@ -165,61 +184,106 @@ def check_signal(symbol: str):
         close15 = float(last15["Close"])
         ema20_15 = float(last15["EMA20"])
 
-        vwap = float(last1["VWAP"]) if pd.notna(last1["VWAP"]) else 0.0
-        volume_1m = float(last1["Volume"])
-        liquidity = price * volume_1m
+        # ===== VWAP =====
+        if pd.isna(last1["VWAP"]):
+            return None
+        vwap = float(last1["VWAP"])
 
-        rvol = float(last1["RVOL"]) if pd.notna(last1["RVOL"]) else 0.0
+        # ===== السيولة =====
+        avg_1m_vol_5bars = df1["Volume"].tail(5).mean()
 
-        breakout_level = float(df5["High"].iloc[-BREAKOUT_LOOKBACK:-1].max())
+        if pd.isna(avg_1m_vol_5bars) or avg_1m_vol_5bars <= 0:
+            return None
+
+        liquidity = price * float(avg_1m_vol_5bars)
+
+        if pd.isna(liquidity) or liquidity <= 0:
+            return None
+
+        # ===== RVOL =====
+        if pd.isna(last1["RVOL"]):
+            return None
+
+        rvol = float(last1["RVOL"])
+
+        if rvol <= 0:
+            return None
+
+        # ===== اختراق =====
+        breakout_window = df5["High"].iloc[-BREAKOUT_LOOKBACK:-1]
+
+        if breakout_window.empty:
+            return None
+
+        breakout_level = float(breakout_window.max())
         breakout_now = price > breakout_level
         near_breakout = price >= breakout_level * NEAR_BREAKOUT_BUFFER
 
+        # ===== اتجاه =====
         trend_1m = price > ema9 > ema20
         trend_5m = close5 > ema20_5
         trend_15m = close15 > ema20_15
-        above_vwap = price > vwap if vwap > 0 else False
+        above_vwap = price > vwap
         ema_stack = ema9 > ema20 > ema50
 
+        # ===== زخم =====
         strong_candle = (price > open1) and ((price - low1) >= (high1 - price))
         volume_ok = liquidity >= MIN_LIQUIDITY
         rvol_ok = rvol >= MIN_RVOL
         momentum_ok = price_change_5m >= MIN_PRICE_CHANGE_5M
 
-        # نظام نقاط
+        # إذا القيم الأساسية ضعيفة، تجاهل فورًا
+        if not volume_ok:
+            return None
+        if not rvol_ok:
+            return None
+        if not momentum_ok:
+            return None
+
+        # ===== نظام نقاط =====
         score = 0
         reasons = []
 
         if near_breakout:
             score += 2
             reasons.append("قريب من الاختراق")
+
         if breakout_now:
             score += 2
             reasons.append("اختراق مؤكد")
+
         if trend_1m:
             score += 1
             reasons.append("اتجاه 1m")
+
         if trend_5m:
             score += 1
             reasons.append("اتجاه 5m")
+
         if trend_15m:
             score += 1
             reasons.append("اتجاه 15m")
+
         if above_vwap:
             score += 1
             reasons.append("فوق VWAP")
+
         if ema_stack:
             score += 1
             reasons.append("EMA stack")
+
         if volume_ok:
             score += 1
             reasons.append("سيولة قوية")
+
         if rvol_ok:
             score += 1
             reasons.append("RVOL قوي")
+
         if momentum_ok:
             score += 1
             reasons.append("زخم 5m")
+
         if strong_candle:
             score += 1
             reasons.append("شمعة قوية")

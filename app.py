@@ -158,9 +158,14 @@ def bot_loop():
 @app.route("/", methods=["GET", "POST"])
 def home():
     return "ELITE BOT RUNNING"
-
 if __name__ == "__main__":
+    import os
+
     print("🔥 STARTING BOT...", flush=True)
-    threading.Thread(target=bot_loop, daemon=True).start()
+
+    t = threading.Thread(target=bot_loop)
+    t.daemon = True
+    t.start()
+
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)

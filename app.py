@@ -1,31 +1,22 @@
-from flask import Flask, request
-import requests
-import os
+from flask import Flask
+import threading
+import time
 
 app = Flask(__name__)
 
-TOKEN = os.environ.get("BOT_TOKEN")
+# ===== البوت =====
+def bot_loop():
+    while True:
+        print("🔥 البوت شغال ويفحص السوق...")
+        time.sleep(60)
 
-@app.route("/", methods=["POST"])
-def webhook():
-    data = request.json
-
-    if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
-
-        reply = f"وصلت رسالتك: {text}"
-
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": reply
-        }
-
-        requests.post(url, json=payload)
-
-    return "ok"
-
+# ===== الصفحة (عشان Render ما يوقفه) =====
 @app.route("/")
 def home():
-    return "Bot is running"
+    return "Trading Bot Running"
+
+# ===== تشغيل الاثنين =====
+if __name__ == "__main__":
+    t = threading.Thread(target=bot_loop)
+    t.start()
+    app.run(host="0.0.0.0", port=10000)

@@ -8,21 +8,20 @@ app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo")
 CHAT_ID = os.environ.get("912977673")
+FINNHUB_API_KEY = os.environ.get("d71aavhr01qot5jcmbq0d71aavhr01qot5jcmbqg")
 
 WATCHLIST = ["TSLA", "NVDA", "AMD", "PLTR", "SOFI", "NIO"]
 
 ALERT_COOLDOWN = 20 * 60
 SCAN_INTERVAL = 60
+
 last_alert = {}
 last_update_id = 0
 
 session = requests.Session()
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
-    "Connection": "keep-alive",
-}
+session.headers.update({
+    "User-Agent": "Mozilla/5.0"
+})
 
 def tg_api(method, data=None, timeout=15):
     if not BOT_TOKEN:
@@ -42,113 +41,167 @@ def send(msg, chat_id=None):
     if not target_chat:
         print("Missing CHAT_ID", flush=True)
         return
-
     tg_api("sendMessage", {"chat_id": target_chat, "text": msg})
 
-def get_batch_data(symbols):
-    try:
-        if not symbols:
-            return {}
-
-        symbols_str = ",".join(symbols)
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols_str}"
-
-        r = session.get(url, headers=DEFAULT_HEADERS, timeout=12)
-
-        if r.status_code != 200:
-            print(f"yahoo status error: {r.status_code}", flush=True)
-            time.sleep(5)
-            return {}
-
-        content_type = r.headers.get("Content-Type", "")
-        if "application/json" not in content_type:
-            print(f"yahoo non-json response: {content_type}", flush=True)
-            time.sleep(5)
-            return {}
-
-        data = r.json()
-        out = {}
-
-        for q in data.get("quoteResponse", {}).get("result", []):
-            sym = q.get("symbol")
-            if not sym:
-                continue
-
-            out[sym] = {
-                "price": q.get("regularMarketPrice"),
-                "change": q.get("regularMarketChangePercent"),
-                "volume": q.get("regularMarketVolume"),
-                "day_high": q.get("regularMarketDayHigh"),
-                "day_low": q.get("regularMarketDayLow"),
-                "prev_close": q.get("regularMarketPreviousClose"),
-            }
-
-        return out
-
-    except Exception as e:
-        print(f"yahoo error: {e}", flush=True)
-        return {}
-
-def build_signal(symbol, d):
-    price = d.get("price")
-    change = d.get("change")
-    volume = d.get("volume")
-    day_high = d.get("day_high")
-    prev_close = d.get("prev_close")
-
-    if price is None or change is None or volume is None:
+def get_finnhub_quote(symbol):
+    if not FINNHUB_API_KEY:
+        print("Missing FINNHUB_API_KEY", flush=True)
         return None
 
     try:
-        price = float(price)
-        change = float(change)
-        volume = int(volume)
+        url = "https://finnhub.io/api/v1/quote"
+        params = {
+            "symbol": symbol,
+            "token": FINNHUB_API_KEY
+        }
+
+        r = session.get(url, params=params, timeout=12)
+
+        if r.status_code != 200:
+            print(f"finnhub quote status error {symbol}: {r.status_code}", flush=True)
+            return None
+
+        data = r.json()
+
+        current_price = data.get("c")
+        change_percent = data.get("dp")
+        high_price = data.get("h")
+        prev_close = data.get("pc")
+
+        if current_price in (None, 0) or change_percent is None:
+            return None
+
+        return {
+            "price": float(current_price),
+            "change": float(change_percent),
+            "day_high": float(high_price) if high_price not in (None, 0) else None,
+            "prev_close": float(prev_close) if prev_close not in (None, 0) else None,
+        }
+
+    except Exception as e:
+        print(f"finnhub quote error {symbol}: {e}", flush=True)
+        return None
+
+def get_finnhub_profile(symbol):
+    if not FINNHUB_API_KEY:
+        return None
+
+    try:
+        url = "https://finnhub.io/api/v1/stock/profile2"
+        params = {
+            "symbol": symbol,
+            "token": FINNHUB_API_KEY
+        }
+
+        r = session.get(url, params=params, timeout=12)
+
+        if r.status_code != 200:
+            print(f"finnhub profile status error {symbol}: {r.status_code}", flush=True)
+            return None
+
+        data = r.json()
+        if not isinstance(data, dict):
+            return None
+
+        return data
+
+    except Exception as e:
+        print(f"finnhub profile error {symbol}: {e}", flush=True)
+        return None
+
+def get_finnhub_metrics(symbol):
+    if not FINNHUB_API_KEY:
+        return None
+
+    try:
+        url = "https://finnhub.io/api/v1/stock/metric"
+        params = {
+            "symbol": symbol,
+            "metric": "all",
+            "token": FINNHUB_API_KEY
+        }
+
+        r = session.get(url, params=params, timeout=12)
+
+        if r.status_code != 200:
+            print(f"finnhub metric status error {symbol}: {r.status_code}", flush=True)
+            return None
+
+        data = r.json()
+        metric = data.get("metric", {})
+        if not isinstance(metric, dict):
+            return None
+
+        return metric
+
+    except Exception as e:
+        print(f"finnhub metric error {symbol}: {e}", flush=True)
+        return None
+
+def estimate_liquidity(price, shares_outstanding):
+    try:
+        if price is None or shares_outstanding in (None, 0):
+            return None
+        return int(float(price) * float(shares_outstanding))
     except Exception:
         return None
 
-    if prev_close in (None, 0):
-        prev_close = price
+def build_signal(symbol):
+    quote = get_finnhub_quote(symbol)
+    if not quote:
+        return None
 
-    liquidity = price * volume
+    profile = get_finnhub_profile(symbol) or {}
+    metric = get_finnhub_metrics(symbol) or {}
+
+    price = quote.get("price")
+    change = quote.get("change")
+    day_high = quote.get("day_high")
+    prev_close = quote.get("prev_close")
+
+    shares_outstanding = profile.get("shareOutstanding")
+    avg_volume_10d = metric.get("10DayAverageTradingVolume")
+
+    liquidity = estimate_liquidity(price, shares_outstanding)
 
     score = 0
     reasons = []
 
-    if change > 2:
+    if change is not None and change > 2:
         score += 3
         reasons.append("تغير قوي")
-    if change > 4:
+    if change is not None and change > 4:
         score += 1
         reasons.append("زخم أعلى")
 
-    if volume > 500000:
-        score += 2
-        reasons.append("حجم جيد")
-    if volume > 1500000:
-        score += 1
-        reasons.append("حجم قوي")
-
-    if liquidity > 1000000:
-        score += 2
-        reasons.append("سيولة قوية")
-    if liquidity > 5000000:
-        score += 1
-        reasons.append("سيولة عالية")
-
-    if price < 10:
+    if price is not None and price < 10:
         score += 1
         reasons.append("سعر مناسب للمضاربة")
 
-    if day_high not in (None, 0):
-        try:
-            day_high = float(day_high)
-            if price >= day_high * 0.985:
-                score += 1
-                reasons.append("قريب من قمة اليوم")
-        except Exception:
-            day_high = None
+    if day_high not in (None, 0) and price >= day_high * 0.985:
+        score += 2
+        reasons.append("قريب من قمة اليوم")
 
-    if score < 6:
+    if avg_volume_10d not in (None, 0):
+        try:
+            if float(avg_volume_10d) > 500000:
+                score += 2
+                reasons.append("متوسط حجم جيد")
+            if float(avg_volume_10d) > 1500000:
+                score += 1
+                reasons.append("متوسط حجم قوي")
+        except Exception:
+            pass
+
+    if liquidity not in (None, 0):
+        if liquidity > 1000000:
+            score += 1
+            reasons.append("سيولة جيدة")
+        if liquidity > 5000000:
+            score += 1
+            reasons.append("سيولة أعلى")
+
+    if score < 5:
         return None
 
     entry = round(price, 2)
@@ -171,45 +224,44 @@ def build_signal(symbol, d):
 🎯 الهدف 2: {t2}
 🎯 الهدف 3: {t3}
 
-⚡ التغير: {round(change, 2)}%
-📈 الحجم: {volume:,}
-💧 السيولة: {int(liquidity):,}$"""
+⚡ التغير: {round(change, 2)}%"""
 
     if day_high not in (None, 0):
         msg += f"\n📍 قمة اليوم: {round(day_high, 2)}"
 
+    if avg_volume_10d not in (None, 0):
+        try:
+            msg += f"\n📈 متوسط الحجم 10 أيام: {int(float(avg_volume_10d)):,}"
+        except Exception:
+            pass
+
+    if liquidity not in (None, 0):
+        msg += f"\n💧 السيولة التقديرية: {liquidity:,}$"
+
     msg += f"\n\n✅ الأسباب: {reasons_text}"
+
     return msg
 
 def market_bot():
-    print("🔥 MARKET BOT STARTED", flush=True)
-    send("🔥 البوت شغال")
+    print("🔥 FINNHUB BOT STARTED", flush=True)
+    send("🔥 البوت شغال على Finnhub")
 
     while True:
         try:
-            data = get_batch_data(WATCHLIST)
             now = time.time()
-
             print(f"📊 scanning {len(WATCHLIST)} stocks", flush=True)
 
-            if not data:
-                print("No market data returned", flush=True)
-                time.sleep(10)
-
             for symbol in WATCHLIST:
-                d = data.get(symbol)
-                if not d:
-                    continue
+                signal = build_signal(symbol)
 
-                signal = build_signal(symbol, d)
-                if not signal:
-                    continue
+                if signal:
+                    last_t = last_alert.get(symbol, 0)
+                    if now - last_t > ALERT_COOLDOWN:
+                        send(signal)
+                        last_alert[symbol] = now
+                        print(f"✅ sent: {symbol}", flush=True)
 
-                last_t = last_alert.get(symbol, 0)
-                if now - last_t > ALERT_COOLDOWN:
-                    send(signal)
-                    last_alert[symbol] = now
-                    print(f"✅ sent: {symbol}", flush=True)
+                time.sleep(1)
 
             print("🔥 يفحص السوق...", flush=True)
             time.sleep(SCAN_INTERVAL)
@@ -223,8 +275,8 @@ def handle_command(text, chat_id):
 
     if t == "/start":
         send(
-            "🚀 البوت شغال\n\n"
-            "الأوامر المتاحة:\n"
+            "🚀 البوت شغال على Finnhub\n\n"
+            "الأوامر:\n"
             "/status - حالة البوت\n"
             "/watchlist - قائمة الأسهم\n"
             "/test - رسالة اختبار",
@@ -259,7 +311,7 @@ def telegram_listener():
 
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
             params = {"timeout": 20, "offset": last_update_id + 1}
-            r = session.get(url, params=params, headers=DEFAULT_HEADERS, timeout=30)
+            r = session.get(url, params=params, timeout=30)
             data = r.json()
 
             if not data.get("ok"):

@@ -2,7 +2,6 @@ import requests
 import time
 import threading
 import os
-import pandas as pd
 import yfinance as yf
 from bs4 import BeautifulSoup
 from flask import Flask
@@ -25,32 +24,41 @@ def send_telegram(message):
 
 # ===== جلب الأسهم من Finviz =====
 def get_finviz_stocks():
-    url = "https://finviz.com/screener.ashx?v=111&f=sh_price_u10,sh_avgvol_o500,sh_relvol_o2,sh_float_u20"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        url = "https://finviz.com/screener.ashx?v=111&f=sh_price_u10,sh_avgvol_o500,sh_relvol_o2,sh_float_u20"
+        headers = {"User-Agent": "Mozilla/5.0"}
 
-    r = requests.get(url, headers=headers)
-    soup = BeautifulSoup(r.text, "html.parser")
+        r = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-    tickers = []
-    for link in soup.find_all("a"):
-        href = link.get("href", "")
-        if "quote.ashx?t=" in href:
-            ticker = link.text.strip()
-            if ticker.isupper() and len(ticker) <= 5:
-                tickers.append(ticker)
+        tickers = []
+        for link in soup.find_all("a"):
+            href = link.get("href", "")
+            if "quote.ashx?t=" in href:
+                ticker = link.text.strip()
+                if ticker.isupper() and len(ticker) <= 5:
+                    tickers.append(ticker)
 
-    return list(set(tickers))[:25]
+        return list(set(tickers))[:20]
+
+    except:
+        return []
 
 # ===== تحليل السهم =====
 def analyze_stock(symbol):
     try:
-        df = yf.download(symbol, period="1d", interval="5m", progress=False)
+        df = yf.download(
+            symbol,
+            period="1d",
+            interval="5m",
+            progress=False,
+            threads=False
+        )
 
         if df.empty or len(df) < 20:
             return None
 
         price = df["Close"].iloc[-1]
-
         volume = df["Volume"].iloc[-1]
         avg_volume = df["Volume"].mean()
 
@@ -59,7 +67,6 @@ def analyze_stock(symbol):
 
         rvol = volume / avg_volume
         change5 = ((price - df["Close"].iloc[-2]) / df["Close"].iloc[-2]) * 100
-
         breakout = df["High"].max()
 
         score = 0
@@ -138,18 +145,20 @@ def scan_market():
                     send_telegram(msg)
                     print(f"🔥 Signal sent: {symbol}")
 
-            time.sleep(60)
+                time.sleep(2)  # مهم ضد الحظر
+
+            time.sleep(120)  # يقلل الضغط
 
         except Exception as e:
             print("ERROR:", e)
-            time.sleep(30)
+            time.sleep(60)
 
-# ===== الصفحة الرئيسية =====
+# ===== الصفحة =====
 @app.route("/")
 def home():
     return "🔥 ELITE BOT RUNNING"
 
-# ===== التشغيل =====
+# ===== تشغيل =====
 if __name__ == "__main__":
     threading.Thread(target=scan_market, daemon=True).start()
 

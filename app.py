@@ -225,16 +225,18 @@ def telegram_listener():
                 continue
 
             for upd in data.get("result", []):
-                last_update_id = upd["update_id"]
+    last_update_id = upd["update_id"]
 
-                message = upd.get("message", {})
-                text = message.get("text", "")
-                chat_id = message.get("chat", {}).get("id")
+    message = upd.get("message")
+    if not message:
+        continue
 
-                if not chat_id or not text:
-                    continue
+    text = message.get("text")
+    chat_id = message.get("chat", {}).get("id")
 
-                handle_command(text, chat_id)
+    if text:
+        print(f"📩 Received: {text}", flush=True)
+        handle_command(text, chat_id)
 
         except Exception as e:
             print(f"telegram listener error: {e}", flush=True)

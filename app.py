@@ -23,20 +23,21 @@ WATCHLIST = [
 # ===== SETTINGS =====
 ALERT_COOLDOWN = 45 * 60   # 45 دقيقة منع تكرار لنفس السهم
 SCAN_INTERVAL = 90         # يفحص كل 90 ثانية
-MAX_CHANGE_FILTER = 15.0   # تجاهل السهم إذا صار متأخر جدًا
-MIN_CHANGE_FILTER = 3.0    # أقل تغير نسمح به
-MIN_PRICE_FILTER = 0.50    # تجاهل الأسهم تحت 0.50
-MAX_PRICE_FILTER = 20.0    # تجاهل الأسهم فوق 20
+MIN_PRICE_FILTER = 0.50
+MAX_PRICE_FILTER = 20.0
+MIN_CHANGE_FILTER = 3.0
+MAX_CHANGE_FILTER = 15.0
+
 last_alert = {}
 
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json",
+    "Accept": "application/json"
 })
 
 # ===== TELEGRAM =====
-def send(msg: str, chat_id: str | None = None) -> None:
+def send_message(msg: str, chat_id: str | None = None) -> None:
     cid = str(chat_id or CHAT_ID).strip()
     if not BOT_TOKEN or not cid:
         print("Missing BOT_TOKEN or CHAT_ID", flush=True)
@@ -52,22 +53,22 @@ def handle_command(text: str, chat_id: str) -> None:
     text = (text or "").strip().lower()
 
     if text == "/start":
-        send(
-            "🚀 البوت الوحش النهائي جاهز\n\n"
+        send_message(
+            "🚀 البوت جاهز\n\n"
             "/status - حالة البوت\n"
             "/watchlist - الأسهم\n"
             "/test - اختبار",
-            chat_id,
+            chat_id
         )
 
     elif text == "/status":
-        send("✅ البوت يعمل بنسخة الوحش النهائي", chat_id)
+        send_message("✅ البوت يعمل بنجاح", chat_id)
 
     elif text == "/watchlist":
-        send("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
+        send_message("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
 
     elif text == "/test":
-        send("🔥 تم الاختبار بنجاح", chat_id)
+        send_message("🔥 تم الاختبار بنجاح", chat_id)
 
 # ===== FINNHUB =====
 def get_quote(symbol: str):
@@ -86,8 +87,8 @@ def get_quote(symbol: str):
 
         data = r.json()
 
-        price = data.get("c")      # current
-        change = data.get("dp")    # % change
+        price = data.get("c")
+        change = data.get("dp")
         day_high = data.get("h")
         day_low = data.get("l")
         prev_close = data.get("pc")
@@ -145,18 +146,13 @@ def build_signal(symbol: str, d: dict):
     if recovery_ratio < 0.80:
         return None
 
-    # فلتر اختراق/ضغط حقيقي
-    # 1) عند قمة اليوم فعليًا
+    # اختراق/ضغط حقيقي
     at_high = price >= day_high * 0.999
-
-    # 2) أو قريب جدًا جدًا من القمة
     very_near_high = price >= day_high * 0.997
-
     if not (at_high or very_near_high):
         return None
 
-    # فلتر يمنع الارتداد الضعيف
-    # إذا كان السعر فقط لمس القمة لكن لم يبتعد عن الافتتاح بما يكفي نرفضه
+    # لازم الاندفاع من الافتتاح محترم
     open_drive = (price - open_price) / open_price
     if open_drive < 0.02:
         return None
@@ -227,15 +223,15 @@ def build_signal(symbol: str, d: dict):
 
 # ===== MARKET BOT =====
 def market_bot():
-    print("🔥 FINAL BEAST BOT STARTED", flush=True)
+    print("🔥 FINAL BOT STARTED", flush=True)
 
     if BOT_TOKEN and CHAT_ID:
-        send("🔥 البوت الوحش النهائي شغال")
+        send_message("🔥 البوت شغال")
 
     while True:
         try:
             now = time.time()
-            print("📊 scanning final beast...", flush=True)
+            print("📊 scanning...", flush=True)
 
             for symbol in WATCHLIST:
                 d = get_quote(symbol)
@@ -247,7 +243,7 @@ def market_bot():
                 if signal:
                     last_t = last_alert.get(symbol, 0)
                     if now - last_t > ALERT_COOLDOWN:
-                        send(signal)
+                        send_message(signal)
                         last_alert[symbol] = now
                         print(f"sent: {symbol}", flush=True)
 
@@ -284,7 +280,7 @@ def home():
 
 # ===== MAIN =====
 if __name__ == "__main__":
-    print("🔥 STARTING FINAL BEAST...", flush=True)
+    print("🔥 STARTING...", flush=True)
     print("BOT_TOKEN:", bool(BOT_TOKEN), flush=True)
     print("CHAT_ID:", bool(CHAT_ID), flush=True)
     print("FINNHUB:", bool(FINNHUB_API_KEY), flush=True)

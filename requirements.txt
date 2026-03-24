@@ -1,6 +1,5 @@
 flask
 requests
-pandas
 yfinance
 beautifulsoup4
 lxml

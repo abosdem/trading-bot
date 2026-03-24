@@ -17,9 +17,18 @@ last_alert = {}
 last_update_id = 0
 
 session = requests.Session()
-session.headers.update({"User-Agent": "Mozilla/5.0"})
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+    "Connection": "keep-alive",
+}
 
 def tg_api(method, data=None, timeout=15):
+    if not BOT_TOKEN:
+        print("Missing BOT_TOKEN", flush=True)
+        return None
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     try:
         r = session.post(url, data=data, timeout=timeout)
@@ -30,20 +39,31 @@ def tg_api(method, data=None, timeout=15):
 
 def send(msg, chat_id=None):
     target_chat = chat_id or CHAT_ID
-    if not BOT_TOKEN or not target_chat:
-        print("Missing BOT_TOKEN or CHAT_ID", flush=True)
+    if not target_chat:
+        print("Missing CHAT_ID", flush=True)
         return
 
     tg_api("sendMessage", {"chat_id": target_chat, "text": msg})
 
 def get_batch_data(symbols):
     try:
+        if not symbols:
+            return {}
+
         symbols_str = ",".join(symbols)
         url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols_str}"
-        r = session.get(url, timeout=10)
+
+        r = session.get(url, headers=DEFAULT_HEADERS, timeout=12)
 
         if r.status_code != 200:
             print(f"yahoo status error: {r.status_code}", flush=True)
+            time.sleep(5)
+            return {}
+
+        content_type = r.headers.get("Content-Type", "")
+        if "application/json" not in content_type:
+            print(f"yahoo non-json response: {content_type}", flush=True)
+            time.sleep(5)
             return {}
 
         data = r.json()
@@ -79,6 +99,13 @@ def build_signal(symbol, d):
     if price is None or change is None or volume is None:
         return None
 
+    try:
+        price = float(price)
+        change = float(change)
+        volume = int(volume)
+    except Exception:
+        return None
+
     if prev_close in (None, 0):
         prev_close = price
 
@@ -112,12 +139,14 @@ def build_signal(symbol, d):
         score += 1
         reasons.append("سعر مناسب للمضاربة")
 
-    near_high = False
     if day_high not in (None, 0):
-        near_high = price >= day_high * 0.985
-        if near_high:
-            score += 1
-            reasons.append("قريب من قمة اليوم")
+        try:
+            day_high = float(day_high)
+            if price >= day_high * 0.985:
+                score += 1
+                reasons.append("قريب من قمة اليوم")
+        except Exception:
+            day_high = None
 
     if score < 6:
         return None
@@ -150,7 +179,6 @@ def build_signal(symbol, d):
         msg += f"\n📍 قمة اليوم: {round(day_high, 2)}"
 
     msg += f"\n\n✅ الأسباب: {reasons_text}"
-
     return msg
 
 def market_bot():
@@ -163,6 +191,10 @@ def market_bot():
             now = time.time()
 
             print(f"📊 scanning {len(WATCHLIST)} stocks", flush=True)
+
+            if not data:
+                print("No market data returned", flush=True)
+                time.sleep(10)
 
             for symbol in WATCHLIST:
                 d = data.get(symbol)
@@ -221,9 +253,13 @@ def telegram_listener():
 
     while True:
         try:
+            if not BOT_TOKEN:
+                time.sleep(5)
+                continue
+
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
             params = {"timeout": 20, "offset": last_update_id + 1}
-            r = session.get(url, params=params, timeout=30)
+            r = session.get(url, params=params, headers=DEFAULT_HEADERS, timeout=30)
             data = r.json()
 
             if not data.get("ok"):

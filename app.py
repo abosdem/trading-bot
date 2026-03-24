@@ -1,192 +1,148 @@
-from flask import Flask
 import requests
 import time
 import threading
-import yfinance as yf
-import pandas as pd
 import os
+import pandas as pd
+import yfinance as yf
+from bs4 import BeautifulSoup
+from flask import Flask
+
+BOT_TOKEN = os.environ.get("8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo")
+CHAT_ID = os.environ.get("912977673")
 
 app = Flask(__name__)
 
-BOT_TOKEN = "8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo"
-CHAT_ID = "912977673"
+sent_signals = set()
 
-CHECK_INTERVAL = 20
-COOLDOWN = 2700
-
-MIN_PRICE = 0.5
-MAX_PRICE = 10
-
-MIN_LIQ = 300000
-MIN_RVOL = 2.5
-MIN_CHANGE = 2.0
-
-sent = {}
-
-# =========================
-def send(msg):
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": message}
     try:
-        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                      data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+        requests.post(url, data=data, timeout=5)
     except:
         pass
 
-@app.route("/")
-def home():
-    return "ELITE MODE"
+# ======= جلب الأسهم من Finviz =======
+def get_finviz_stocks():
+    url = "https://finviz.com/screener.ashx?v=111&f=sh_price_u10,sh_avgvol_o500,sh_relvol_o2,sh_float_u20"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-# =========================
-def get_elite_stocks():
+    tickers = []
+    for link in soup.find_all("a"):
+        href = link.get("href", "")
+        if "quote.ashx?t=" in href:
+            ticker = link.text.strip()
+            if ticker.isupper() and len(ticker) <= 5:
+                tickers.append(ticker)
+
+    return list(set(tickers))[:30]  # نخبة فقط
+
+# ======= تحليل السهم =======
+def analyze_stock(symbol):
     try:
-        url = "https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey=demo"
-        data = requests.get(url, timeout=10).json()
-
-        stocks = []
-        for x in data:
-            price = x.get("price", 0)
-            change = x.get("changesPercentage", 0)
-
-            if MIN_PRICE <= price <= MAX_PRICE and change > 3:
-                stocks.append(x["symbol"])
-
-        return stocks[:25]
-    except:
-        return []
-
-# =========================
-def get(symbol, tf):
-    try:
-        df = yf.download(symbol, period="1d", interval=tf, progress=False, prepost=True)
-        if df is None or df.empty:
+        df = yf.download(symbol, period="1d", interval="5m", progress=False)
+        if df.empty or len(df) < 20:
             return None
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        price = df["Close"].iloc[-1]
 
-        df = df.dropna()
-        if df.empty:
+        volume = df["Volume"].iloc[-1]
+        avg_volume = df["Volume"].mean()
+        rvol = volume / avg_volume if avg_volume > 0 else 0
+
+        change5 = ((price - df["Close"].iloc[-2]) / df["Close"].iloc[-2]) * 100
+
+        high_break = df["High"].max()
+
+        score = 0
+
+        if rvol > 2:
+            score += 3
+        if change5 > 1:
+            score += 2
+        if price >= high_break * 0.98:
+            score += 3
+        if volume > 500000:
+            score += 3
+
+        if score < 6:
             return None
 
-        return df
+        entry = price
+        stop = round(price * 0.96, 2)
+
+        tp1 = round(price * 1.05, 2)
+        tp2 = round(price * 1.08, 2)
+        tp3 = round(price * 1.10, 2)
+
+        liquidity = volume * price
+
+        return {
+            "symbol": symbol,
+            "price": round(price, 2),
+            "stop": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rvol": round(rvol, 2),
+            "change5": round(change5, 2),
+            "liquidity": int(liquidity),
+            "score": score
+        }
+
     except:
         return None
 
-# =========================
-def ind(df):
-    df["ema9"] = df["Close"].ewm(9).mean()
-    df["ema20"] = df["Close"].ewm(20).mean()
-    df["ema50"] = df["Close"].ewm(50).mean()
-
-    df["avgv"] = df["Volume"].rolling(20).mean()
-    df["rvol"] = df["Volume"] / df["avgv"]
-
-    tp = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["vwap"] = (tp * df["Volume"]).cumsum() / df["Volume"].cumsum()
-
-    return df
-
-# =========================
-def signal(sym):
-    d1 = get(sym, "1m")
-    d5 = get(sym, "5m")
-    d15 = get(sym, "15m")
-
-    if d1 is None or d5 is None or d15 is None:
-        return None
-
-    if len(d1) < 30 or len(d5) < 30 or len(d15) < 30:
-        return None
-
-    d1 = ind(d1)
-    d5 = ind(d5)
-    d15 = ind(d15)
-
-    l = d1.iloc[-1]
-
-    price = float(l["Close"])
-    prev = float(d1["Close"].iloc[-6])
-
-    change = ((price - prev) / prev) * 100 if prev else 0
-    if change < MIN_CHANGE:
-        return None
-
-    vol = d1["Volume"].tail(5).mean()
-    if pd.isna(vol) or vol <= 0:
-        return None
-
-    liq = price * vol
-    if liq < MIN_LIQ:
-        return None
-
-    rvol = float(l["rvol"]) if pd.notna(l["rvol"]) else 0
-    if rvol < MIN_RVOL:
-        return None
-
-    breakout = float(d5["High"].iloc[-20:-1].max())
-    if price < breakout * 0.995:
-        return None
-
-    ema9 = float(l["ema9"])
-    ema20 = float(l["ema20"])
-    ema50 = float(l["ema50"])
-
-    if not (price > ema9 > ema20):
-        return None
-
-    if float(d5.iloc[-1]["Close"]) < float(d5.iloc[-1]["ema20"]):
-        return None
-
-    if float(d15.iloc[-1]["Close"]) < float(d15.iloc[-1]["ema20"]):
-        return None
-
-    if pd.isna(l["vwap"]) or price < float(l["vwap"]):
-        return None
-
-    entry = round(price, 2)
-    stop = round(entry * 0.96, 2)
-
-    t1 = round(entry * 1.04, 2)
-    t2 = round(entry * 1.07, 2)
-    t3 = round(entry * 1.10, 2)
-
-    return f"""💰 إشارة نخبة قوية
-
-{sym}
-
-دخول: {entry}
-وقف: {stop}
-
-هدف1: {t1}
-هدف2: {t2}
-هدف3: {t3}
-
-سيولة: {round(liq/1000,1)}K
-RVOL: {round(rvol,2)}
-5m: {round(change,2)}%
-"""
-
-# =========================
-def loop():
-    send("🔥 وضع النخبة بدأ")
+# ======= فحص السوق =======
+def scan_market():
+    send_telegram("🔥 الوحش بدأ يفحص السوق")
 
     while True:
         try:
-            stocks = get_elite_stocks()
+            stocks = get_finviz_stocks()
 
-            for s in stocks:
-                sig = signal(s)
+            for symbol in stocks:
+                result = analyze_stock(symbol)
 
-                if sig:
-                    if time.time() - sent.get(s, 0) > COOLDOWN:
-                        send(sig)
-                        sent[s] = time.time()
+                if result and symbol not in sent_signals:
+                    sent_signals.add(symbol)
 
-            time.sleep(CHECK_INTERVAL)
+                    msg = f"""
+🚨 إشارة نخبة
 
-        except:
-            time.sleep(10)
+📊 السهم: {result['symbol']}
+🧠 النوع: قبل الانفجار
+⭐ التقييم: {result['score']}/11
 
-# =========================
+💰 الدخول: {result['price']}
+🛑 الوقف: {result['stop']}
+
+🎯 الهدف 1: {result['tp1']}
+🎯 الهدف 2: {result['tp2']}
+🎯 الهدف 3: {result['tp3']}
+
+💧 السيولة: {result['liquidity']:,}$
+📈 RVOL: {result['rvol']}
+⚡ تغير 5 دقائق: {result['change5']}%
+
+🔥 سيولة + زخم + اقتراب اختراق
+"""
+                    send_telegram(msg)
+                    print(f"Signal sent: {symbol}")
+
+            time.sleep(60)
+
+        except Exception as e:
+            print("Error:", e)
+            time.sleep(30)
+
+@app.route("/")
+def home():
+    return "🔥 ELITE BOT RUNNING"
+
 if __name__ == "__main__":
-    threading.Thread(target=loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    threading.Thread(target=scan_market, daemon=True).start()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

@@ -8,20 +8,28 @@ import pandas as pd
 
 app = Flask(__name__)
 
-BOT_TOKEN = "حط_توكنك"
-CHAT_ID = "حط_ايديك"
+# 🔐 بياناتك
+BOT_TOKEN = "حط_توكنك_هنا"
+CHAT_ID = "حط_ايديك_هنا"
 
+# 📊 قائمة الأسهم
 WATCHLIST = ["NIO", "TSLA", "AMD", "PLTR"]
 
+# 🧠 منع تكرار رسالة التشغيل
+sent_start = False
+
+# 📤 إرسال تيليجرام
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": message}
     requests.post(url, data=data)
 
+# 📈 جلب البيانات
 def get_data(symbol, interval):
     df = yf.download(symbol, period="1d", interval=interval)
     return df
 
+# 🔍 تحليل الإشارة
 def check_signal(symbol):
     df5 = get_data(symbol, "5m")
     df15 = get_data(symbol, "15m")
@@ -29,11 +37,9 @@ def check_signal(symbol):
     if df5.empty or df15.empty:
         return None
 
-    # EMA
     df5["EMA20"] = df5["Close"].ewm(span=20).mean()
     df15["EMA20"] = df15["Close"].ewm(span=20).mean()
 
-    # Volume
     avg_vol = df5["Volume"].rolling(20).mean()
 
     last = df5.iloc[-1]
@@ -61,23 +67,31 @@ def check_signal(symbol):
 
     return None
 
+# 🤖 البوت
 def bot_loop():
-    send_telegram("🚀 البوت بدأ يفحص السوق")
+    global sent_start
+
+    # ✅ يرسل مرة وحدة فقط
+    if not sent_start:
+        send_telegram("🚀 البوت بدأ يفحص السوق")
+        sent_start = True
 
     while True:
         for stock in WATCHLIST:
             signal = check_signal(stock)
             if signal:
                 send_telegram(signal)
-                print(f"Signal found for {stock}")
+                print(f"Signal: {stock}")
 
-        print("🔥 يفحص السوق...")
+        print("🔥 يفحص السوق...", flush=True)
         time.sleep(60)
 
+# 🌐 ويب
 @app.route("/")
 def home():
     return "Bot is running"
 
+# 🚀 تشغيل
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))

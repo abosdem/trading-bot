@@ -1,5 +1,6 @@
 flask
 requests
-gunicorn
 pandas
 yfinance
+beautifulsoup4
+lxml

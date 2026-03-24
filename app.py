@@ -8,56 +8,54 @@ from flask import Flask
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("8452344889:AAFkEzBOJ5RdWmXAQtxt8s42R_TUWPlrfFo")
-CHAT_ID = os.environ.get("912977673")
+CHAT_ID = os.environ.get("CHAT_ID")
 
 CHECK_INTERVAL = 120
 COOLDOWN = 3600
 
 sent = {}
 
-def send(msg: str):
+def send(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": msg},
             timeout=10
         )
-    except:
-        pass
+    except Exception as e:
+        print(f"Telegram error: {e}", flush=True)
 
 def get_finviz_stocks():
     try:
         url = "https://finviz.com/screener.ashx?v=111&f=geo_usa,sh_price_u10,sh_avgvol_o500,sh_relvol_o2,sh_float_u20"
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(r.text, "lxml")
 
-        out = []
+        tickers = []
         for a in soup.find_all("a"):
             href = a.get("href", "")
             if "quote.ashx?t=" in href:
                 t = a.text.strip().upper()
-                if t.isalpha() and 1 <= len(t) <= 5 and t not in out:
-                    out.append(t)
+                if t.isalpha() and 1 <= len(t) <= 5 and t not in tickers:
+                    tickers.append(t)
 
-        return out[:20]
-    except:
+        return tickers[:20]
+    except Exception as e:
+        print(f"Finviz error: {e}", flush=True)
         return []
 
 def get_quote(symbol):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
         r = requests.get(url, timeout=15).json()
+
         result = r["chart"]["result"][0]
         quote = result["indicators"]["quote"][0]
 
-        closes = quote["close"]
-        highs = quote["high"]
-        volumes = quote["volume"]
-
-        closes = [x for x in closes if x is not None]
-        highs = [x for x in highs if x is not None]
-        volumes = [x for x in volumes if x is not None]
+        closes = [x for x in quote.get("close", []) if x is not None]
+        highs = [x for x in quote.get("high", []) if x is not None]
+        volumes = [x for x in quote.get("volume", []) if x is not None]
 
         if len(closes) < 20 or len(highs) < 20 or len(volumes) < 20:
             return None
@@ -68,10 +66,10 @@ def get_quote(symbol):
         vol = float(volumes[-1])
         avg_vol = sum(volumes[-20:]) / 20
 
-        if avg_vol <= 0:
+        if avg_vol <= 0 or prev <= 0:
             return None
 
-        change = ((price - prev) / prev) * 100 if prev else 0
+        change = ((price - prev) / prev) * 100
         rvol = vol / avg_vol
         liq = price * vol
 
@@ -84,7 +82,8 @@ def get_quote(symbol):
             "near_breakout": price >= breakout * 0.995,
             "vol": int(vol)
         }
-    except:
+    except Exception as e:
+        print(f"Quote error {symbol}: {e}", flush=True)
         return None
 
 def analyze(symbol):
@@ -131,21 +130,29 @@ def analyze(symbol):
 """
 
 def bot_loop():
+    print("🔥 الوحش بدأ", flush=True)
     send("🔥 الوحش بدأ")
 
     while True:
         try:
             stocks = get_finviz_stocks()
+            print(f"📊 stocks found: {len(stocks)}", flush=True)
 
             for s in stocks:
                 sig = analyze(s)
+
                 if sig and time.time() - sent.get(s, 0) > COOLDOWN:
                     send(sig)
                     sent[s] = time.time()
+                    print(f"✅ أرسل: {s}", flush=True)
+
                 time.sleep(1)
 
+            print("🔥 يفحص السوق...", flush=True)
             time.sleep(CHECK_INTERVAL)
-        except:
+
+        except Exception as e:
+            print(f"Loop error: {e}", flush=True)
             time.sleep(30)
 
 @app.route("/", methods=["GET", "POST"])
@@ -153,6 +160,7 @@ def home():
     return "ELITE BOT RUNNING"
 
 if __name__ == "__main__":
+    print("🔥 STARTING BOT...", flush=True)
     threading.Thread(target=bot_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

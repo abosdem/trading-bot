@@ -6,52 +6,62 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
+# ===== ENV =====
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 FINNHUB_API_KEY = (os.getenv("FINNHUB_API_KEY") or "").strip()
 
+# ===== WATCHLIST =====
 WATCHLIST = [
-    "VEEE","SOWG","STI","ATPC","SMSI","LGVN","ACXP",
-    "AGRZ","LASE","DDD","ALTO","MOBX","IOVA","PRSO",
-    "EDSA","YYAI","JEM","DXST","ASNS","SMWB","TPET",
-    "BSM","SND","BOF","SOUN","CPIX","NIO","VSA","MYO","MNDR","FIEE"
+    "VEEE", "SOWG", "STI", "ATPC", "SMSI", "LGVN", "ACXP",
+    "AGRZ", "LASE", "DDD", "ALTO", "MOBX", "IOVA", "PRSO",
+    "EDSA", "YYAI", "JEM", "DXST", "ASNS", "SMWB", "TPET",
+    "BSM", "SND", "BOF", "SOUN", "CPIX", "NIO", "VSA",
+    "MYO", "MNDR", "FIEE"
 ]
 
-ALERT_COOLDOWN = 30 * 60
-SCAN_INTERVAL = 90
+# ===== SETTINGS =====
+ALERT_COOLDOWN = 45 * 60   # 45 دقيقة منع تكرار لنفس السهم
+SCAN_INTERVAL = 90         # يفحص كل 90 ثانية
+MAX_CHANGE_FILTER = 15.0   # تجاهل السهم إذا صار متأخر جدًا
+MIN_CHANGE_FILTER = 3.0    # أقل تغير نسمح به
+MIN_PRICE_FILTER = 0.50    # تجاهل الأسهم تحت 0.50
+MAX_PRICE_FILTER = 20.0    # تجاهل الأسهم فوق 20
 last_alert = {}
 
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
+    "Accept": "application/json",
 })
 
-def send(msg, chat_id=None):
+# ===== TELEGRAM =====
+def send(msg: str, chat_id: str | None = None) -> None:
     cid = str(chat_id or CHAT_ID).strip()
     if not BOT_TOKEN or not cid:
+        print("Missing BOT_TOKEN or CHAT_ID", flush=True)
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
         session.post(url, data={"chat_id": cid, "text": msg}, timeout=10)
     except Exception as e:
-        print("send error:", e, flush=True)
+        print(f"send error: {e}", flush=True)
 
-def handle_command(text, chat_id):
+def handle_command(text: str, chat_id: str) -> None:
     text = (text or "").strip().lower()
 
     if text == "/start":
         send(
-            "🚀 البوت B+ جاهز\n\n"
+            "🚀 البوت الوحش النهائي جاهز\n\n"
             "/status - حالة البوت\n"
             "/watchlist - الأسهم\n"
             "/test - اختبار",
-            chat_id
+            chat_id,
         )
 
     elif text == "/status":
-        send("✅ البوت يعمل بنسخة B+ فلتر اختراق حقيقي", chat_id)
+        send("✅ البوت يعمل بنسخة الوحش النهائي", chat_id)
 
     elif text == "/watchlist":
         send("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
@@ -59,7 +69,8 @@ def handle_command(text, chat_id):
     elif text == "/test":
         send("🔥 تم الاختبار بنجاح", chat_id)
 
-def get_quote(symbol):
+# ===== FINNHUB =====
+def get_quote(symbol: str):
     if not FINNHUB_API_KEY:
         print("Missing FINNHUB_API_KEY", flush=True)
         return None
@@ -75,8 +86,8 @@ def get_quote(symbol):
 
         data = r.json()
 
-        price = data.get("c")
-        change = data.get("dp")
+        price = data.get("c")      # current
+        change = data.get("dp")    # % change
         day_high = data.get("h")
         day_low = data.get("l")
         prev_close = data.get("pc")
@@ -98,7 +109,8 @@ def get_quote(symbol):
         print(f"finnhub error {symbol}: {e}", flush=True)
         return None
 
-def build_signal(symbol, d):
+# ===== SIGNAL LOGIC =====
+def build_signal(symbol: str, d: dict):
     price = d["price"]
     change = d["change"]
     day_high = d["day_high"]
@@ -106,14 +118,11 @@ def build_signal(symbol, d):
     prev_close = d["prev_close"]
     open_price = d["open_price"]
 
-    # فلترة أولية
-    if price < 0.50:
+    # فلترة أساسية
+    if price < MIN_PRICE_FILTER or price > MAX_PRICE_FILTER:
         return None
 
-    if change < 3:
-        return None
-
-    if change > 18:
+    if change < MIN_CHANGE_FILTER or change > MAX_CHANGE_FILTER:
         return None
 
     if not day_high or not day_low or not open_price:
@@ -123,26 +132,33 @@ def build_signal(symbol, d):
     if day_range <= 0:
         return None
 
-    # 1) اختراق حقيقي: السعر لازم يكون فوق افتتاح اليوم
+    # لازم يكون السهم أخضر عن إغلاق أمس
+    if price <= prev_close:
+        return None
+
+    # لازم يكون فوق الافتتاح
     if price <= open_price:
         return None
 
-    # 2) لا نريد مجرد ارتداد من قاع بعيد عن المقاومة
+    # لازم يكون راجع من القاع بشكل قوي
     recovery_ratio = (price - day_low) / day_range
     if recovery_ratio < 0.80:
         return None
 
-    # 3) لازم يكون عند المقاومة تقريباً أو كاسرها
-    near_high = price >= day_high * 0.998
-    if not near_high:
+    # فلتر اختراق/ضغط حقيقي
+    # 1) عند قمة اليوم فعليًا
+    at_high = price >= day_high * 0.999
+
+    # 2) أو قريب جدًا جدًا من القمة
+    very_near_high = price >= day_high * 0.997
+
+    if not (at_high or very_near_high):
         return None
 
-    # 4) منع الأسهم الهابطة يومياً رغم الارتداد
-    if price <= prev_close * 1.03:
-        return None
-
-    # 5) فلترة أسهم مضاربية مناسبة فقط
-    if price > 20:
+    # فلتر يمنع الارتداد الضعيف
+    # إذا كان السعر فقط لمس القمة لكن لم يبتعد عن الافتتاح بما يكفي نرفضه
+    open_drive = (price - open_price) / open_price
+    if open_drive < 0.02:
         return None
 
     score = 0
@@ -156,13 +172,16 @@ def build_signal(symbol, d):
         score += 1
         reasons.append("اندفاع واضح")
 
-    if 0.5 <= price <= 10:
+    if MIN_PRICE_FILTER <= price <= 10:
         score += 1
         reasons.append("سعر مضاربي")
 
-    if near_high:
+    if at_high:
         score += 2
         reasons.append("عند قمة اليوم")
+    elif very_near_high:
+        score += 1
+        reasons.append("قريب جدًا من القمة")
 
     if recovery_ratio >= 0.90:
         score += 1
@@ -171,6 +190,10 @@ def build_signal(symbol, d):
     if price > open_price:
         score += 1
         reasons.append("فوق الافتتاح")
+
+    if open_drive >= 0.04:
+        score += 1
+        reasons.append("اندفاع من الافتتاح")
 
     if score < 6:
         return None
@@ -183,10 +206,10 @@ def build_signal(symbol, d):
 
     reasons_text = " - ".join(reasons[:4])
 
-    return f"""🚨 اختراق حقيقي
+    return f"""🚨 اختراق نظيف
 
 📊 السهم: {symbol}
-⭐ التقييم: {score}/8
+⭐ التقييم: {score}/9
 
 💰 الدخول: {entry}
 🛑 وقف الخسارة: {stop}
@@ -202,16 +225,17 @@ def build_signal(symbol, d):
 
 ✅ الأسباب: {reasons_text}"""
 
+# ===== MARKET BOT =====
 def market_bot():
-    print("🔥 B+ BOT STARTED", flush=True)
+    print("🔥 FINAL BEAST BOT STARTED", flush=True)
 
     if BOT_TOKEN and CHAT_ID:
-        send("🔥 البوت B+ شغال")
+        send("🔥 البوت الوحش النهائي شغال")
 
     while True:
         try:
             now = time.time()
-            print("📊 scanning B+...", flush=True)
+            print("📊 scanning final beast...", flush=True)
 
             for symbol in WATCHLIST:
                 d = get_quote(symbol)
@@ -225,16 +249,17 @@ def market_bot():
                     if now - last_t > ALERT_COOLDOWN:
                         send(signal)
                         last_alert[symbol] = now
-                        print("sent:", symbol, flush=True)
+                        print(f"sent: {symbol}", flush=True)
 
                 time.sleep(1)
 
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
-            print("bot error:", e, flush=True)
+            print(f"bot error: {e}", flush=True)
             time.sleep(10)
 
+# ===== WEBHOOK =====
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     data = request.get_json(silent=True)
@@ -247,17 +272,19 @@ def telegram_webhook():
     chat_id = message.get("chat", {}).get("id")
 
     if text and chat_id:
-        print("📩", text, flush=True)
-        handle_command(text, chat_id)
+        print(f"📩 {text}", flush=True)
+        handle_command(text, str(chat_id))
 
     return "ok", 200
 
+# ===== ROOT =====
 @app.route("/", methods=["GET", "POST"])
 def home():
     return "OK", 200
 
+# ===== MAIN =====
 if __name__ == "__main__":
-    print("🔥 STARTING B+...", flush=True)
+    print("🔥 STARTING FINAL BEAST...", flush=True)
     print("BOT_TOKEN:", bool(BOT_TOKEN), flush=True)
     print("CHAT_ID:", bool(CHAT_ID), flush=True)
     print("FINNHUB:", bool(FINNHUB_API_KEY), flush=True)

@@ -23,8 +23,8 @@ WATCHLIST = [
 
 # ===== SETTINGS =====
 ALERT_COOLDOWN = 30 * 60
-SCAN_INTERVAL = 75
-PER_SYMBOL_DELAY = 1.2
+SCAN_INTERVAL = 60
+PER_SYMBOL_DELAY = 2.2
 
 MIN_PRICE = 0.50
 MAX_PRICE = 20.0
@@ -55,6 +55,14 @@ session.headers.update({
 def log(msg):
     print(msg, flush=True)
 
+def safe_float(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
 def calc_ema(values, period):
     if not values:
         return 0.0
@@ -70,14 +78,6 @@ def calc_ema(values, period):
 
     return ema
 
-def safe_float(value, default=0.0):
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except Exception:
-        return default
-
 # ===== TELEGRAM =====
 def send_message(text, chat_id=None):
     target_chat_id = str(chat_id or CHAT_ID).strip()
@@ -91,10 +91,7 @@ def send_message(text, chat_id=None):
     try:
         response = session.post(
             url,
-            data={
-                "chat_id": target_chat_id,
-                "text": text
-            },
+            data={"chat_id": target_chat_id, "text": text},
             timeout=20
         )
         log(f"Telegram send status: {response.status_code}")
@@ -136,53 +133,53 @@ def handle_command(text, chat_id):
             send_message("📭 لا توجد تنبيهات مرسلة بعد", chat_id)
         else:
             now_ts = time.time()
-            rows = []
+            lines = []
             for symbol, ts in sorted(last_alert.items(), key=lambda x: x[1], reverse=True)[:10]:
                 mins = int((now_ts - ts) / 60)
-                rows.append(f"{symbol} - قبل {mins} دقيقة")
-            send_message("🕘 آخر التنبيهات:\n" + "\n".join(rows), chat_id)
+                lines.append(f"{symbol} - قبل {mins} دقيقة")
+            send_message("🕘 آخر التنبيهات:\n" + "\n".join(lines), chat_id)
 
     else:
         send_message("📩 الأمر غير معروف", chat_id)
 
 # ===== FINNHUB =====
-def finnhub_get(path, params):
+def finnhub_get_candles(symbol):
     if not FINNHUB_API_KEY:
         log("Missing FINNHUB_API_KEY")
         return None
 
-    url = f"https://finnhub.io/api/v1/{path}"
-    payload = dict(params)
-    payload["token"] = FINNHUB_API_KEY
-
-    try:
-        response = session.get(url, params=payload, timeout=20)
-
-        if response.status_code != 200:
-            log(f"Finnhub {path} status error: {response.status_code}")
-            return None
-
-        return response.json()
-
-    except Exception as e:
-        log(f"Finnhub {path} error: {e}")
-        return None
-
-def get_intraday_metrics(symbol):
     now_ts = int(time.time())
     start_ts = now_ts - (60 * 60 * 8)
 
-    data = finnhub_get(
-        "stock/candle",
-        {
-            "symbol": symbol,
-            "resolution": "1",
-            "from": start_ts,
-            "to": now_ts
-        }
-    )
+    url = "https://finnhub.io/api/v1/stock/candle"
+    params = {
+        "symbol": symbol,
+        "resolution": "1",
+        "from": start_ts,
+        "to": now_ts,
+        "token": FINNHUB_API_KEY
+    }
 
-    if not data or data.get("s") != "ok":
+    try:
+        response = session.get(url, params=params, timeout=20)
+
+        if response.status_code != 200:
+            log(f"Finnhub candle status error {symbol}: {response.status_code}")
+            return None
+
+        data = response.json()
+        if not data or data.get("s") != "ok":
+            return None
+
+        return data
+
+    except Exception as e:
+        log(f"Finnhub candle error {symbol}: {e}")
+        return None
+
+def get_intraday_metrics(symbol):
+    data = finnhub_get_candles(symbol)
+    if not data:
         return None
 
     closes = data.get("c") or []
@@ -196,18 +193,20 @@ def get_intraday_metrics(symbol):
         return None
 
     valid = []
-    for i in range(len(closes)):
-        c = safe_float(closes[i], None)
-        h = safe_float(highs[i], None) if i < len(highs) else c
-        l = safe_float(lows[i], None) if i < len(lows) else c
-        o = safe_float(opens[i], None) if i < len(opens) else c
-        v = safe_float(volumes[i], 0.0) if i < len(volumes) else 0.0
-        t = int(timestamps[i]) if i < len(timestamps) and timestamps[i] is not None else 0
+    total_len = min(len(closes), len(highs), len(lows), len(opens), len(volumes), len(timestamps))
+
+    for i in range(total_len):
+        c = safe_float(closes[i])
+        h = safe_float(highs[i])
+        l = safe_float(lows[i])
+        o = safe_float(opens[i])
+        v = safe_float(volumes[i], 0.0)
+        t = timestamps[i]
 
         if c is None or h is None or l is None or o is None:
             continue
 
-        valid.append((t, o, h, l, c, v))
+        valid.append((int(t), o, h, l, c, v))
 
     if len(valid) < 10:
         return None
@@ -226,17 +225,17 @@ def get_intraday_metrics(symbol):
     last_candle_volume = volumes_only[-1]
     avg_last_10_volume = sum(volumes_only[-10:]) / min(10, len(volumes_only))
 
-    typical_price_volume_sum = 0.0
-    total_volume = 0.0
+    total_pv = 0.0
+    total_v = 0.0
     for _, _, h, l, c, v in valid:
         typical_price = (h + l + c) / 3.0
-        typical_price_volume_sum += typical_price * v
-        total_volume += v
+        total_pv += typical_price * v
+        total_v += v
 
-    if total_volume <= 0:
+    if total_v <= 0:
         return None
 
-    vwap = typical_price_volume_sum / total_volume
+    vwap = total_pv / total_v
     ema9 = calc_ema(closes_only, 9)
     change = ((price - open_price) / open_price) * 100 if open_price > 0 else 0.0
 

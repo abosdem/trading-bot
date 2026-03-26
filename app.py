@@ -11,141 +11,100 @@ CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID", "912977673")
 
-WATCHLIST = [
-    "VSA","NIO","CPIX","SOUN","BOF",
-    "SND","PRSO","AGRZ","LASE","DDD"
-]
+WATCHLIST = ["VSA","NIO","CPIX","SOUN","BOF","SND"]
 
 ALERT_COOLDOWN = 1800
 SCAN_INTERVAL = 40
-DELAY = 1.2
-
-MIN_PRICE = 0.5
-MAX_PRICE = 20
-MIN_CHANGE = 2
 
 last_alert = {}
 
-session = requests.Session()
-
-# ===== TELEGRAM =====
 def send(msg):
     try:
-        session.post(
+        requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=10
+            data={"chat_id": CHAT_ID, "text": msg}
         )
     except:
         pass
 
-# ===== DATA =====
 def get_quote(symbol):
     try:
-        r = session.get(
+        r = requests.get(
             "https://finnhub.io/api/v1/quote",
-            params={"symbol": symbol, "token": FINNHUB_API_KEY},
-            timeout=10
+            params={"symbol": symbol, "token": FINNHUB_API_KEY}
         )
         d = r.json()
-
-        if not d.get("c"):
-            return None
-
-        return {
-            "price": d["c"],
-            "change": d["dp"],
-            "high": d["h"],
-            "low": d["l"],
-            "open": d["o"]
-        }
+        return d
     except:
         return None
 
-# ===== SIGNAL =====
-def check(symbol, q):
+def check(symbol, d):
+    price = d.get("c")
+    change = d.get("dp")
+    high = d.get("h")
+    low = d.get("l")
+    open_p = d.get("o")
 
-    price = q["price"]
-    change = q["change"]
-
-    if price < MIN_PRICE or price > MAX_PRICE:
+    if not price or not change:
         return None
 
-    if change < MIN_CHANGE:
+    if price < 0.5 or price > 20:
         return None
 
-    if price <= q["open"]:
+    if change < 2:
         return None
 
-    day_range = q["high"] - q["low"]
-    if day_range <= 0:
+    if price <= open_p:
         return None
 
-    recovery = (price - q["low"]) / day_range
+    if high <= low:
+        return None
+
+    recovery = (price - low) / (high - low)
 
     if recovery < 0.7:
         return None
 
-    near_high = price >= q["high"] * 0.97
-
-    if not near_high:
-        return None
-
-    score = 0
-
-    if change >= 3: score += 2
-    if change >= 5: score += 1
-    if recovery > 0.85: score += 1
-
-    if score < 3:
+    if price < high * 0.97:
         return None
 
     return f"""🚨 إشارة
 
 📊 {symbol}
-⭐ {score}/5
-
 💰 {round(price,2)}
-🎯 {round(price*1.05,2)} / {round(price*1.1,2)}
-🛑 {round(price*0.96,2)}
-
 ⚡ {round(change,2)}%
 """
 
-# ===== BOT =====
 def bot():
-    print("🔥 RUNNING")
+    print("🔥 RUNNING", flush=True)
 
     while True:
         for s in WATCHLIST:
+            d = get_quote(s)
 
-            q = get_quote(s)
-
-            if not q:
-                print(s, "no data")
-                time.sleep(DELAY)
+            if not d:
+                print("no data", s, flush=True)
                 continue
 
-            signal = check(s, q)
+            sig = check(s, d)
 
-            if signal:
+            if sig:
                 now = time.time()
-
-                if now - last_alert.get(s, 0) > ALERT_COOLDOWN:
-                    send(signal)
+                if now - last_alert.get(s,0) > ALERT_COOLDOWN:
+                    send(sig)
                     last_alert[s] = now
-                    print("sent:", s)
+                    print("sent", s, flush=True)
                 else:
-                    print(s, "cooldown")
-
+                    print("cooldown", s, flush=True)
             else:
-                print(s, "no setup")
-
-            time.sleep(DELAY)
+                print("no setup", s, flush=True)
 
         time.sleep(SCAN_INTERVAL)
 
-# ===== WEBHOOK =====
+@app.route("/")
+def home():
+    return "OK"
+
 @app.route("/telegram", methods=["POST"])
 def telegram():
     data = request.json
@@ -162,11 +121,6 @@ def telegram():
 
     return "ok"
 
-@app.route("/")
-def home():
-    return "OK"
-
-# ===== RUN =====
 if __name__ == "__main__":
     threading.Thread(target=bot, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

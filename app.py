@@ -14,9 +14,6 @@ FINNHUB_API_KEY = (os.getenv("FINNHUB_API_KEY") or "").strip()
 # ===== 🔒 SECURITY =====
 ALLOWED_USER_ID = "912977673"
 
-def is_allowed_user(user_id):
-    return str(user_id) == ALLOWED_USER_ID
-
 # ===== WATCHLIST =====
 WATCHLIST = [
     "VEEE","SOWG","STI","ATPC","SMSI","LGVN","ACXP",
@@ -36,195 +33,113 @@ MIN_CHANGE = 3.0
 MAX_CHANGE = 15.0
 MIN_VOLUME = 300000
 
-BREAKOUT_BUFFER = 1.002
 NEAR_HIGH_BUFFER = 0.998
 
 last_alert = {}
 
 session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
-})
 
 # ===== TELEGRAM =====
 def send_message(text, chat_id=None):
     target_chat_id = str(chat_id or CHAT_ID).strip()
 
     if not BOT_TOKEN or not target_chat_id:
-        print("Missing BOT_TOKEN or CHAT_ID", flush=True)
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     try:
-        session.post(
-            url,
-            data={"chat_id": target_chat_id, "text": text},
-            timeout=15
-        )
-    except Exception as e:
-        print(f"Telegram error: {e}", flush=True)
+        session.post(url, data={"chat_id": target_chat_id, "text": text}, timeout=10)
+    except:
+        pass
 
 def handle_command(text, chat_id):
-    cmd = (text or "").strip().lower()
+    cmd = (text or "").lower()
 
     if cmd == "/start":
-        send_message(
-            "🚀 البوت جاهز\n\n"
-            "/status\n/watchlist\n/test",
-            chat_id
-        )
+        send_message("🚀 البوت جاهز", chat_id)
 
     elif cmd == "/status":
-        send_message("✅ البوت يعمل بكفاءة", chat_id)
+        send_message("✅ البوت يعمل", chat_id)
 
     elif cmd == "/watchlist":
-        send_message("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
+        send_message("\n".join(WATCHLIST), chat_id)
 
     elif cmd == "/test":
-        send_message("🔥 الاختبار ناجح", chat_id)
-
-    else:
-        send_message(f"📩 {text}", chat_id)
+        send_message("🔥 شغال", chat_id)
 
 # ===== FINNHUB =====
 def get_quote(symbol):
     if not FINNHUB_API_KEY:
         return None
 
-    url = "https://finnhub.io/api/v1/quote"
-    params = {"symbol": symbol, "token": FINNHUB_API_KEY}
-
     try:
-        r = session.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return None
+        r = session.get(
+            "https://finnhub.io/api/v1/quote",
+            params={"symbol": symbol, "token": FINNHUB_API_KEY},
+            timeout=10
+        )
 
         d = r.json()
 
-        price = d.get("c")
-        change = d.get("dp")
-        high = d.get("h")
-        low = d.get("l")
-        prev = d.get("pc")
-        open_p = d.get("o")
-        volume = d.get("v")
-
-        if price in (None, 0) or change is None or prev in (None, 0):
-            return None
-
         return {
-            "price": float(price),
-            "change": float(change),
-            "day_high": float(high) if high else None,
-            "day_low": float(low) if low else None,
-            "prev_close": float(prev),
-            "open_price": float(open_p) if open_p else None,
-            "volume": float(volume) if volume else 0,
+            "price": d.get("c"),
+            "change": d.get("dp"),
+            "high": d.get("h"),
+            "low": d.get("l"),
+            "prev": d.get("pc"),
+            "open": d.get("o"),
+            "volume": d.get("v") or 0,
         }
     except:
         return None
 
 # ===== SIGNAL =====
-def build_signal(symbol, q):
+def build_signal(s, q):
+    if not q:
+        return None
+
     p = q["price"]
     c = q["change"]
-    h = q["day_high"]
-    l = q["day_low"]
-    prev = q["prev_close"]
-    o = q["open_price"]
-    volume = q["volume"]
+    h = q["high"]
+    l = q["low"]
+    o = q["open"]
+    v = q["volume"]
+
+    if not p or not c or not h or not l or not o:
+        return None
 
     if p < MIN_PRICE or p > MAX_PRICE:
         return None
+
     if c < MIN_CHANGE or c > MAX_CHANGE:
         return None
-    if volume < MIN_VOLUME:
-        return None
-    if not h or not l or not o:
-        return None
-    if p <= prev or p <= o:
+
+    if v < MIN_VOLUME:
         return None
 
-    rng = h - l
-    if rng <= 0:
+    if p <= o:
         return None
 
-    recovery = (p - l) / rng
-    if recovery < 0.82:
+    if p < h * NEAR_HIGH_BUFFER:
         return None
 
-    drive = (p - o) / o
-    if drive < 0.02:
-        return None
-
-    # 🔥 تأكيد اختراق حقيقي
-    breakout = p >= h * 1.003
-    breakout_strength = (p - h) / h if h else 0
-
-    if breakout and breakout_strength < 0.002:
-        return None
-
-    near = p >= h * NEAR_HIGH_BUFFER
-
-    if not breakout and not near:
-        return None
-
-    # 🔥 فلترة إضافية
-    if volume < 500000 and c < 5:
-        return None
-
-    score = 0
-
-    if c >= 3: score += 2
-    if c >= 5: score += 1
-    if breakout: score += 3
-    if recovery >= 0.9: score += 1
-    if drive >= 0.04: score += 1
-    if volume >= 500000: score += 1
-
-    if score < 7:
-        return None
-
-    entry = round(p, 2)
-    stop = round(entry * 0.97, 2)
-    t1 = round(entry * 1.04, 2)
-    t2 = round(entry * 1.08, 2)
-    t3 = round(entry * 1.12, 2)
-
-    return (
-        f"🚨 إشارة قوية\n\n"
-        f"📊 السهم: {symbol}\n"
-        f"⭐ التقييم: {score}/10\n\n"
-        f"💰 الدخول: {entry}\n"
-        f"🛑 وقف الخسارة: {stop}\n\n"
-        f"🎯 الهدف1: {t1}\n"
-        f"🎯 الهدف2: {t2}\n"
-        f"🎯 الهدف3: {t3}\n\n"
-        f"⚡ التغير: {round(c,2)}%\n"
-        f"💧 السيولة: {int(volume):,}\n"
-    )
+    return f"🚨 {s}\n💰 {round(p,2)}\n⚡ {round(c,2)}%\n💧 {int(v):,}"
 
 # ===== BOT =====
 def market_bot():
-    if BOT_TOKEN and CHAT_ID:
-        send_message("🔥 البوت شغال")
-
     while True:
         try:
             now = time.time()
 
             for s in WATCHLIST:
                 q = get_quote(s)
-                if not q:
-                    time.sleep(1)
-                    continue
 
                 signal = build_signal(s, q)
 
                 if signal:
                     last = last_alert.get(s, 0)
+
                     if now - last > ALERT_COOLDOWN:
                         send_message(signal)
                         last_alert[s] = now
@@ -234,31 +149,34 @@ def market_bot():
             time.sleep(SCAN_INTERVAL)
 
         except:
-            time.sleep(10)
+            time.sleep(5)
 
 # ===== WEBHOOK =====
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     try:
-        data = request.get_json(force=True)
+        data = request.get_json()
         message = data.get("message", {})
+
+        user = message.get("from")
+        if not user:
+            return "ok", 200
+
+        user_id = str(user.get("id"))
+
+        # 🔒 الحماية
+        if user_id != ALLOWED_USER_ID:
+            return "ok", 200
 
         text = message.get("text")
         chat_id = message.get("chat", {}).get("id")
-        user_id = message.get("from", {}).get("id")
-
-        # 🔒 الحماية
-        if not is_allowed_user(user_id):
-            print(f"🚫 BLOCKED: {user_id}", flush=True)
-            return "ok", 200
 
         if text and chat_id:
             handle_command(text, str(chat_id))
 
         return "ok", 200
 
-    except Exception as e:
-        print(e)
+    except:
         return "ok", 200
 
 @app.route("/", methods=["GET"])

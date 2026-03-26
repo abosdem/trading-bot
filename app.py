@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import threading
 import requests
 from flask import Flask, request
@@ -9,33 +10,48 @@ app = Flask(__name__)
 # ===== ENV =====
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
-FINNHUB_API_KEY = (os.getenv("FINNHUB_API_KEY") or "").strip()
+TWELVEDATA_API_KEY = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
+ALLOWED_USER_ID = (os.getenv("ALLOWED_USER_ID") or "912977673").strip()
 
 # ===== WATCHLIST =====
+# للخطة المجانية: خلها صغيرة ونظيفة
 WATCHLIST = [
-    "VEEE", "SOWG", "STI", "ATPC", "SMSI", "LGVN", "ACXP",
-    "AGRZ", "LASE", "DDD", "ALTO", "MOBX", "IOVA", "PRSO",
-    "EDSA", "YYAI", "JEM", "DXST", "ASNS", "SMWB", "TPET",
-    "BSM", "SND", "BOF", "SOUN", "CPIX", "NIO", "VSA",
-    "MYO", "MNDR", "FIEE"
+    "VSA",
+    "NIO",
+    "SOUN",
+    "CPIX",
+    "PRSO",
 ]
 
 # ===== SETTINGS =====
-ALERT_COOLDOWN = 45 * 60
-SCAN_INTERVAL = 90
+ALERT_COOLDOWN = 45 * 60      # 45 دقيقة
+SCAN_INTERVAL = 180           # كل 3 دقائق
+PER_SYMBOL_DELAY = 1.0
 
 MIN_PRICE = 0.50
 MAX_PRICE = 20.0
-MIN_CHANGE = 3.0
-MAX_CHANGE = 15.0
 
-# لازم يكون فوق القمة بنسبة بسيطة لتأكيد الاختراق
-BREAKOUT_BUFFER = 1.002   # 0.2%
+MIN_CHANGE_PCT = 2.0
+MIN_SESSION_VOLUME = 250000
+MIN_LAST_CANDLE_VOLUME = 10000
 
-# لو كان فقط قريب من القمة، ما نرسل إلا لو الاندفاع قوي
-NEAR_HIGH_BUFFER = 0.998  # قريب جدًا من القمة
+NEAR_HIGH_BUFFER = 0.996
+PRESSURE_RECOVERY_MIN = 0.80
+BREAKOUT_RECOVERY_MIN = 0.88
 
+MIN_RVOL_PRESSURE = 1.20
+MIN_RVOL_BREAKOUT = 1.50
+
+MAX_PULLBACK_FROM_HIGH = 0.030
+
+TIME_SERIES_INTERVAL = "1min"
+TIME_SERIES_OUTPUTSIZE = 30
+
+DEBUG_MODE = True
+
+# ===== STATE =====
 last_alert = {}
+symbol_state = {}
 
 session = requests.Session()
 session.headers.update({
@@ -43,288 +59,483 @@ session.headers.update({
     "Accept": "application/json"
 })
 
+# ===== HELPERS =====
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+def safe_float(value, default=None):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+def calc_ema(values, period):
+    if not values:
+        return 0.0
+
+    if len(values) < period:
+        return sum(values) / len(values)
+
+    multiplier = 2 / (period + 1)
+    ema = sum(values[:period]) / period
+
+    for value in values[period:]:
+        ema = ((value - ema) * multiplier) + ema
+
+    return ema
+
+def calc_vwap(rows):
+    total_pv = 0.0
+    total_v = 0.0
+
+    for row in rows:
+        h = row["high"]
+        l = row["low"]
+        c = row["close"]
+        v = row["volume"]
+
+        typical_price = (h + l + c) / 3.0
+        total_pv += typical_price * v
+        total_v += v
+
+    if total_v <= 0:
+        return 0.0
+
+    return total_pv / total_v
+
 # ===== TELEGRAM =====
 def send_message(text, chat_id=None):
     target_chat_id = str(chat_id or CHAT_ID).strip()
 
     if not BOT_TOKEN or not target_chat_id:
-        print("Missing BOT_TOKEN or CHAT_ID", flush=True)
-        return
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        log("Missing BOT_TOKEN or CHAT_ID")
+        return False
 
     try:
         response = session.post(
-            url,
-            data={"chat_id": target_chat_id, "text": text},
-            timeout=15
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={
+                "chat_id": target_chat_id,
+                "text": text
+            },
+            timeout=20
         )
-        print(f"Telegram send status: {response.status_code}", flush=True)
+        log(f"Telegram send status: {response.status_code}")
+        return response.status_code == 200
     except Exception as e:
-        print(f"Telegram send error: {e}", flush=True)
+        log(f"Telegram send error: {e}")
+        return False
 
 def handle_command(text, chat_id):
     cmd = (text or "").strip().lower()
 
     if cmd == "/start":
         send_message(
-            "🚀 البوت المطور جاهز\n\n"
+            "🚀 البوت الوحش جاهز\n\n"
             "/status - حالة البوت\n"
             "/watchlist - قائمة الأسهم\n"
-            "/test - اختبار",
+            "/test - اختبار\n"
+            "/last - آخر التنبيهات",
             chat_id
         )
 
     elif cmd == "/status":
-        send_message("✅ البوت يعمل بالفلترة المطورة", chat_id)
+        send_message(
+            "✅ البوت يعمل\n"
+            f"📡 عدد الأسهم: {len(WATCHLIST)}\n"
+            f"⏱️ الفحص كل: {SCAN_INTERVAL} ثانية\n"
+            f"🧊 التبريد: {ALERT_COOLDOWN // 60} دقيقة\n"
+            f"📊 المصدر: Twelve Data",
+            chat_id
+        )
 
     elif cmd == "/watchlist":
         send_message("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
 
     elif cmd == "/test":
-        send_message("🔥 تم الاختبار بنجاح", chat_id)
+        send_message("🔥 الاختبار ناجح", chat_id)
+
+    elif cmd == "/last":
+        if not last_alert:
+            send_message("📭 لا توجد تنبيهات مرسلة بعد", chat_id)
+        else:
+            now_ts = time.time()
+            lines = []
+            for symbol, ts in sorted(last_alert.items(), key=lambda x: x[1], reverse=True)[:10]:
+                mins = int((now_ts - ts) / 60)
+                lines.append(f"{symbol} - قبل {mins} دقيقة")
+            send_message("🕘 آخر التنبيهات:\n" + "\n".join(lines), chat_id)
 
     else:
-        send_message(f"📩 وصلني: {text}", chat_id)
+        send_message("📩 الأمر غير معروف", chat_id)
 
-# ===== FINNHUB =====
-def get_quote(symbol):
-    if not FINNHUB_API_KEY:
-        print("Missing FINNHUB_API_KEY", flush=True)
+# ===== TWELVE DATA =====
+def get_time_series(symbol):
+    if not TWELVEDATA_API_KEY:
+        log("Missing TWELVEDATA_API_KEY")
         return None
 
-    url = "https://finnhub.io/api/v1/quote"
-    params = {
-        "symbol": symbol,
-        "token": FINNHUB_API_KEY
-    }
-
     try:
-        response = session.get(url, params=params, timeout=15)
+        response = session.get(
+            "https://api.twelvedata.com/time_series",
+            params={
+                "symbol": symbol,
+                "interval": TIME_SERIES_INTERVAL,
+                "outputsize": TIME_SERIES_OUTPUTSIZE,
+                "order": "ASC",
+                "timezone": "Exchange",
+                "apikey": TWELVEDATA_API_KEY
+            },
+            timeout=20
+        )
 
         if response.status_code != 200:
-            print(f"Finnhub status error {symbol}: {response.status_code}", flush=True)
+            log(f"Twelve Data status error {symbol}: {response.status_code}")
             return None
 
         data = response.json()
 
-        price = data.get("c")
-        change = data.get("dp")
-        day_high = data.get("h")
-        day_low = data.get("l")
-        prev_close = data.get("pc")
-        open_price = data.get("o")
-
-        if price in (None, 0) or change is None or prev_close in (None, 0):
+        # Twelve Data يرجع status=error مع message/code أحيانًا
+        if isinstance(data, dict) and data.get("status") == "error":
+            log(f"Twelve Data api error {symbol}: {data.get('message')}")
             return None
 
-        return {
-            "price": float(price),
-            "change": float(change),
-            "day_high": float(day_high) if day_high not in (None, 0) else None,
-            "day_low": float(day_low) if day_low not in (None, 0) else None,
-            "prev_close": float(prev_close),
-            "open_price": float(open_price) if open_price not in (None, 0) else None,
-        }
+        values = data.get("values")
+        if not values or not isinstance(values, list):
+            return None
+
+        rows = []
+        for item in values:
+            o = safe_float(item.get("open"))
+            h = safe_float(item.get("high"))
+            l = safe_float(item.get("low"))
+            c = safe_float(item.get("close"))
+            v = safe_float(item.get("volume"), 0.0)
+            dt = item.get("datetime")
+
+            if None in (o, h, l, c) or dt is None:
+                continue
+
+            rows.append({
+                "datetime": dt,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v
+            })
+
+        if len(rows) < 12:
+            return None
+
+        return rows
 
     except Exception as e:
-        print(f"Finnhub error {symbol}: {e}", flush=True)
+        log(f"Twelve Data request error {symbol}: {e}")
         return None
 
-# ===== فلترة مطورة =====
-def build_signal(symbol, quote_data):
-    price = quote_data["price"]
-    change = quote_data["change"]
-    day_high = quote_data["day_high"]
-    day_low = quote_data["day_low"]
-    prev_close = quote_data["prev_close"]
-    open_price = quote_data["open_price"]
+def get_intraday_metrics(symbol):
+    rows = get_time_series(symbol)
+    if not rows:
+        return None
+
+    closes = [r["close"] for r in rows]
+    highs = [r["high"] for r in rows]
+    lows = [r["low"] for r in rows]
+    opens = [r["open"] for r in rows]
+    volumes = [r["volume"] for r in rows]
+
+    price = closes[-1]
+    open_price = opens[0]
+    day_high = max(highs)
+    day_low = min(lows)
+    session_volume = sum(volumes)
+    last_candle_volume = volumes[-1]
+    avg_last_10_volume = sum(volumes[-10:]) / min(10, len(volumes))
+
+    ema9 = calc_ema(closes, 9)
+    ema20 = calc_ema(closes, 20)
+    vwap = calc_vwap(rows)
+
+    change_pct = ((price - open_price) / open_price) * 100 if open_price > 0 else 0.0
+    rvol = (last_candle_volume / avg_last_10_volume) if avg_last_10_volume > 0 else 0.0
+    prev_high = max(highs[:-1]) if len(highs) > 1 else day_high
+
+    return {
+        "price": price,
+        "change_pct": change_pct,
+        "day_high": day_high,
+        "day_low": day_low,
+        "open_price": open_price,
+        "session_volume": session_volume,
+        "last_candle_volume": last_candle_volume,
+        "avg_last_10_volume": avg_last_10_volume,
+        "rvol": rvol,
+        "vwap": vwap,
+        "ema9": ema9,
+        "ema20": ema20,
+        "prev_high": prev_high,
+        "rows": rows
+    }
+
+# ===== SIGNAL ENGINE =====
+def build_signal(symbol, m):
+    price = m["price"]
+    change_pct = m["change_pct"]
+    day_high = m["day_high"]
+    day_low = m["day_low"]
+    open_price = m["open_price"]
+    session_volume = m["session_volume"]
+    last_candle_volume = m["last_candle_volume"]
+    rvol = m["rvol"]
+    vwap = m["vwap"]
+    ema9 = m["ema9"]
+    ema20 = m["ema20"]
+    prev_high = m["prev_high"]
 
     if price < MIN_PRICE or price > MAX_PRICE:
-        return None
+        return None, "price_outside_range"
 
-    if change < MIN_CHANGE or change > MAX_CHANGE:
-        return None
+    if change_pct < MIN_CHANGE_PCT:
+        return None, "change_too_low"
 
-    if not day_high or not day_low or not open_price:
-        return None
+    if session_volume < MIN_SESSION_VOLUME:
+        return None, "low_session_volume"
+
+    if last_candle_volume < MIN_LAST_CANDLE_VOLUME:
+        return None, "low_last_candle_volume"
+
+    if price <= open_price:
+        return None, "below_open"
 
     day_range = day_high - day_low
     if day_range <= 0:
-        return None
+        return None, "invalid_day_range"
 
-    # فوق إغلاق أمس
-    if price <= prev_close:
-        return None
-
-    # فوق الافتتاح
-    if price <= open_price:
-        return None
-
-    # ارتداد قوي من قاع اليوم
     recovery_ratio = (price - day_low) / day_range
-    if recovery_ratio < 0.82:
-        return None
-
-    # قوة الاندفاع من الافتتاح
-    open_drive = (price - open_price) / open_price
-    if open_drive < 0.02:
-        return None
-
-    # اختراق فعلي أو تثبيت قوي قرب القمة
-    real_breakout = price >= day_high * BREAKOUT_BUFFER
     near_high = price >= day_high * NEAR_HIGH_BUFFER
+    above_vwap = price >= vwap
+    above_ema9 = price >= ema9
+    above_ema20 = price >= ema20
+    pullback_from_high = (day_high - price) / day_high if day_high > 0 else 1.0
 
-    if not real_breakout and not near_high:
-        return None
+    if recovery_ratio < PRESSURE_RECOVERY_MIN:
+        return None, "weak_recovery"
 
-    # إذا كان فقط قريب من القمة، لازم تكون القوة أعلى
-    if near_high and not real_breakout:
-        if change < 5:
-            return None
-        if open_drive < 0.035:
-            return None
-        if recovery_ratio < 0.90:
-            return None
+    if pullback_from_high > MAX_PULLBACK_FROM_HIGH:
+        return None, "too_far_from_high"
+
+    breakout_confirmed = (
+        price >= prev_high
+        and near_high
+        and above_vwap
+        and above_ema9
+        and above_ema20
+        and recovery_ratio >= BREAKOUT_RECOVERY_MIN
+        and rvol >= MIN_RVOL_BREAKOUT
+    )
+
+    pressure_setup = (
+        not breakout_confirmed
+        and near_high
+        and above_vwap
+        and above_ema9
+        and recovery_ratio >= 0.84
+        and rvol >= MIN_RVOL_PRESSURE
+    )
+
+    if not breakout_confirmed and not pressure_setup:
+        return None, "no_setup"
 
     score = 0
     reasons = []
 
-    if change >= 3:
-        score += 2
+    if change_pct >= 2:
+        score += 1
+        reasons.append("زخم")
+
+    if change_pct >= 4:
+        score += 1
         reasons.append("زخم قوي")
 
-    if change >= 5:
+    if change_pct >= 6:
         score += 1
-        reasons.append("اندفاع واضح")
+        reasons.append("اندفاع")
 
-    if MIN_PRICE <= price <= 10:
+    if session_volume >= MIN_SESSION_VOLUME:
         score += 1
-        reasons.append("سعر مضاربي")
+        reasons.append("سيولة مؤكدة")
 
-    if real_breakout:
-        score += 3
-        reasons.append("اختراق فعلي")
-    elif near_high:
+    if session_volume >= 1000000:
         score += 1
-        reasons.append("ضغط تحت القمة")
+        reasons.append("سيولة قوية")
 
     if recovery_ratio >= 0.90:
         score += 1
         reasons.append("سيطرة مشترين")
 
-    if price > open_price:
+    if above_vwap:
         score += 1
-        reasons.append("فوق الافتتاح")
+        reasons.append("فوق VWAP")
 
-    if open_drive >= 0.04:
+    if above_ema9:
         score += 1
-        reasons.append("اندفاع من الافتتاح")
+        reasons.append("فوق EMA9")
 
-    # نبي إشارات أقل وأقوى
-    if score < 7:
-        return None
+    if above_ema20:
+        score += 1
+        reasons.append("فوق EMA20")
+
+    if rvol >= 1.5:
+        score += 1
+        reasons.append("فوليوم لحظي قوي")
+
+    if breakout_confirmed:
+        score += 2
+        reasons.append("اختراق مؤكد")
+        signal_type = "اختراق مؤكد"
+        min_score_required = 7
+    else:
+        score += 1
+        reasons.append("ضغط قبل الاختراق")
+        signal_type = "ضغط قوي قبل الاختراق"
+        min_score_required = 6
+
+    if score < min_score_required:
+        return None, f"score_too_low_{score}"
 
     entry = round(price, 2)
-    stop = round(entry * 0.97, 2)
+    stop = round(min(vwap, ema9, entry * 0.97), 2)
+    if stop <= 0 or stop >= entry:
+        stop = round(entry * 0.97, 2)
+
     target1 = round(entry * 1.04, 2)
     target2 = round(entry * 1.08, 2)
     target3 = round(entry * 1.12, 2)
 
-    reasons_text = " - ".join(reasons[:4])
-
-    signal_type = "اختراق فعلي" if real_breakout else "ضغط قوي قبل الاختراق"
+    reasons_text = " - ".join(reasons[:6])
 
     message = (
         f"🚨 {signal_type}\n\n"
         f"📊 السهم: {symbol}\n"
-        f"⭐ التقييم: {score}/10\n\n"
+        f"⭐ التقييم: {score}/12\n\n"
         f"💰 الدخول: {entry}\n"
         f"🛑 وقف الخسارة: {stop}\n\n"
         f"🎯 الهدف 1: {target1}\n"
         f"🎯 الهدف 2: {target2}\n"
         f"🎯 الهدف 3: {target3}\n\n"
-        f"⚡ التغير: {round(change, 2)}%\n"
-        f"📍 قمة اليوم: {round(day_high, 2)}\n"
-        f"📍 قاع اليوم: {round(day_low, 2)}\n"
-        f"📍 الافتتاح: {round(open_price, 2)}\n\n"
+        f"⚡ التغير: {round(change_pct, 2)}%\n"
+        f"💧 سيولة الجلسة: {int(session_volume):,}\n"
+        f"🕯️ فوليوم آخر دقيقة: {int(last_candle_volume):,}\n"
+        f"📈 RVOL: {round(rvol, 2)}\n"
+        f"📍 قمة الجلسة: {round(day_high, 2)}\n"
+        f"📍 قاع الجلسة: {round(day_low, 2)}\n"
+        f"📍 الافتتاح: {round(open_price, 2)}\n"
+        f"📈 VWAP: {round(vwap, 4)}\n"
+        f"📉 EMA9: {round(ema9, 4)}\n"
+        f"📉 EMA20: {round(ema20, 4)}\n\n"
         f"✅ الأسباب: {reasons_text}"
     )
 
-    return message
+    return message, "ok"
 
-# ===== البوت =====
+def update_symbol_state(symbol, m):
+    symbol_state[symbol] = {
+        "last_seen_high": m.get("day_high"),
+        "last_seen_price": m.get("price"),
+        "last_seen_session_volume": m.get("session_volume"),
+        "updated_at": time.time()
+    }
+
+# ===== BOT =====
 def market_bot():
-    print("🔥 FILTERED BOT STARTED", flush=True)
+    log("🔥 BEAST BOT STARTED")
 
     if BOT_TOKEN and CHAT_ID:
-        send_message("🔥 البوت المطور شغال")
+        send_message("🔥 البوت الوحش على Twelve Data شغال")
 
     while True:
         try:
-            now = time.time()
-            print("📊 scanning filtered...", flush=True)
+            log("📊 scanning beast mode...")
 
             for symbol in WATCHLIST:
-                quote_data = get_quote(symbol)
+                metrics = get_intraday_metrics(symbol)
 
-                if not quote_data:
-                    time.sleep(1)
+                if not metrics:
+                    if DEBUG_MODE:
+                        log(f"{symbol} rejected: no_intraday_metrics")
+                    time.sleep(PER_SYMBOL_DELAY)
                     continue
 
-                signal = build_signal(symbol, quote_data)
+                signal, reason = build_signal(symbol, metrics)
 
                 if signal:
-                    last_time = last_alert.get(symbol, 0)
+                    now_ts = time.time()
+                    last_ts = last_alert.get(symbol, 0)
 
-                    if now - last_time > ALERT_COOLDOWN:
-                        send_message(signal)
-                        last_alert[symbol] = now
-                        print(f"sent: {symbol}", flush=True)
+                    if now_ts - last_ts > ALERT_COOLDOWN:
+                        sent = send_message(signal)
+                        if sent:
+                            last_alert[symbol] = now_ts
+                            log(f"sent: {symbol}")
+                    else:
+                        if DEBUG_MODE:
+                            remain = int((ALERT_COOLDOWN - (now_ts - last_ts)) / 60)
+                            log(f"{symbol} rejected: cooldown_{remain}m")
+                else:
+                    if DEBUG_MODE:
+                        log(f"{symbol} rejected: {reason}")
 
-                time.sleep(1)
+                update_symbol_state(symbol, metrics)
+                time.sleep(PER_SYMBOL_DELAY)
 
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
-            print(f"bot error: {e}", flush=True)
+            log(f"market_bot error: {e}")
             time.sleep(10)
 
-# ===== Webhook =====
+# ===== WEBHOOK =====
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     try:
-        data = request.get_json(force=True, silent=False)
-        print(f"🔥 TELEGRAM UPDATE: {data}", flush=True)
+        data = request.get_json(force=True) or {}
+        msg = data.get("message", {})
+        user = msg.get("from")
 
-        if not data:
+        if not user:
             return "ok", 200
 
-        message = data.get("message", {})
-        text = message.get("text", "")
-        chat_id = message.get("chat", {}).get("id")
+        user_id = str(user.get("id"))
+        if user_id != ALLOWED_USER_ID:
+            log(f"🚫 BLOCKED: {user_id}")
+            return "ok", 200
+
+        text = msg.get("text")
+        chat_id = msg.get("chat", {}).get("id")
 
         if text and chat_id:
-            print(f"📩 TEXT: {text}", flush=True)
             handle_command(text, str(chat_id))
 
         return "ok", 200
 
     except Exception as e:
-        print(f"telegram_webhook error: {e}", flush=True)
+        log(f"telegram_webhook error: {e}")
         return "ok", 200
 
-# ===== الصفحة الرئيسية =====
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET"])
 def home():
     return "OK", 200
 
-# ===== التشغيل =====
+# ===== RUN =====
 if __name__ == "__main__":
-    print("🔥 STARTING...", flush=True)
-    print("BOT_TOKEN:", bool(BOT_TOKEN), flush=True)
-    print("CHAT_ID:", bool(CHAT_ID), flush=True)
-    print("FINNHUB:", bool(FINNHUB_API_KEY), flush=True)
+    log("🔥 STARTING BEAST BOT...")
+    log(f"BOT_TOKEN: {bool(BOT_TOKEN)}")
+    log(f"CHAT_ID: {bool(CHAT_ID)}")
+    log(f"TWELVEDATA_API_KEY: {bool(TWELVEDATA_API_KEY)}")
+    log(f"ALLOWED_USER_ID: {bool(ALLOWED_USER_ID)}")
 
     threading.Thread(target=market_bot, daemon=True).start()
 

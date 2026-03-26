@@ -12,7 +12,7 @@ CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 FINNHUB_API_KEY = (os.getenv("FINNHUB_API_KEY") or "").strip()
 
 # ===== 🔒 SECURITY =====
-ALLOWED_USER_ID = "123456789"  # 🔥 حط هنا ID حقك
+ALLOWED_USER_ID = "912977673"
 
 def is_allowed_user(user_id):
     return str(user_id) == ALLOWED_USER_ID
@@ -34,7 +34,7 @@ MIN_PRICE = 0.50
 MAX_PRICE = 20.0
 MIN_CHANGE = 3.0
 MAX_CHANGE = 15.0
-MIN_VOLUME = 300000  # 🔥 فلتر السيولة
+MIN_VOLUME = 300000
 
 BREAKOUT_BUFFER = 1.002
 NEAR_HIGH_BUFFER = 0.998
@@ -77,13 +77,13 @@ def handle_command(text, chat_id):
         )
 
     elif cmd == "/status":
-        send_message("✅ البوت يعمل", chat_id)
+        send_message("✅ البوت يعمل بكفاءة", chat_id)
 
     elif cmd == "/watchlist":
         send_message("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
 
     elif cmd == "/test":
-        send_message("🔥 شغال", chat_id)
+        send_message("🔥 الاختبار ناجح", chat_id)
 
     else:
         send_message(f"📩 {text}", chat_id)
@@ -136,7 +136,6 @@ def build_signal(symbol, q):
     o = q["open_price"]
     volume = q["volume"]
 
-    # فلترة أساسية
     if p < MIN_PRICE or p > MAX_PRICE:
         return None
     if c < MIN_CHANGE or c > MAX_CHANGE:
@@ -152,17 +151,15 @@ def build_signal(symbol, q):
     if rng <= 0:
         return None
 
-    # ارتداد قوي
     recovery = (p - l) / rng
     if recovery < 0.82:
         return None
 
-    # اندفاع من الافتتاح
     drive = (p - o) / o
     if drive < 0.02:
         return None
 
-    # ===== 🔥 تأكيد الاختراق =====
+    # 🔥 تأكيد اختراق حقيقي
     breakout = p >= h * 1.003
     breakout_strength = (p - h) / h if h else 0
 
@@ -174,42 +171,22 @@ def build_signal(symbol, q):
     if not breakout and not near:
         return None
 
-    # فلترة إضافية قوة + سيولة
+    # 🔥 فلترة إضافية
     if volume < 500000 and c < 5:
         return None
 
-    # ===== SCORING =====
     score = 0
-    reasons = []
 
-    if c >= 3:
-        score += 2
-        reasons.append("زخم قوي")
-
-    if c >= 5:
-        score += 1
-        reasons.append("اندفاع واضح")
-
-    if breakout:
-        score += 3
-        reasons.append("اختراق مؤكد")
-
-    if recovery >= 0.9:
-        score += 1
-        reasons.append("سيطرة مشترين")
-
-    if drive >= 0.04:
-        score += 1
-        reasons.append("اندفاع من الافتتاح")
-
-    if volume >= 500000:
-        score += 1
-        reasons.append("سيولة قوية")
+    if c >= 3: score += 2
+    if c >= 5: score += 1
+    if breakout: score += 3
+    if recovery >= 0.9: score += 1
+    if drive >= 0.04: score += 1
+    if volume >= 500000: score += 1
 
     if score < 7:
         return None
 
-    # ===== TARGETS =====
     entry = round(p, 2)
     stop = round(entry * 0.97, 2)
     t1 = round(entry * 1.04, 2)
@@ -270,7 +247,7 @@ def telegram_webhook():
         chat_id = message.get("chat", {}).get("id")
         user_id = message.get("from", {}).get("id")
 
-        # 🔒 حماية
+        # 🔒 الحماية
         if not is_allowed_user(user_id):
             print(f"🚫 BLOCKED: {user_id}", flush=True)
             return "ok", 200

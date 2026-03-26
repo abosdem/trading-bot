@@ -27,29 +27,28 @@ WATCHLIST = [
 ALERT_COOLDOWN = 45 * 60
 SCAN_INTERVAL = 90
 
-MIN_PRICE = 0.50
-MAX_PRICE = 20.0
-MIN_CHANGE = 3.0
-MAX_CHANGE = 15.0
+MIN_PRICE = 0.5
+MAX_PRICE = 20
+MIN_CHANGE = 3
+MAX_CHANGE = 15
 MIN_VOLUME = 300000
 
 NEAR_HIGH_BUFFER = 0.998
 
 last_alert = {}
-
 session = requests.Session()
 
 # ===== TELEGRAM =====
 def send_message(text, chat_id=None):
-    target_chat_id = str(chat_id or CHAT_ID).strip()
-
-    if not BOT_TOKEN or not target_chat_id:
+    chat = str(chat_id or CHAT_ID)
+    if not BOT_TOKEN or not chat:
         return
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
     try:
-        session.post(url, data={"chat_id": target_chat_id, "text": text}, timeout=10)
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": chat, "text": text},
+            timeout=10
+        )
     except:
         pass
 
@@ -60,26 +59,24 @@ def handle_command(text, chat_id):
         send_message("🚀 البوت جاهز", chat_id)
 
     elif cmd == "/status":
-        send_message("✅ البوت يعمل", chat_id)
+        send_message("✅ البوت يعمل بكفاءة", chat_id)
 
     elif cmd == "/watchlist":
         send_message("\n".join(WATCHLIST), chat_id)
 
     elif cmd == "/test":
-        send_message("🔥 شغال", chat_id)
+        send_message("🔥 تم الاختبار", chat_id)
 
 # ===== FINNHUB =====
 def get_quote(symbol):
     if not FINNHUB_API_KEY:
         return None
-
     try:
         r = session.get(
             "https://finnhub.io/api/v1/quote",
             params={"symbol": symbol, "token": FINNHUB_API_KEY},
             timeout=10
         )
-
         d = r.json()
 
         return {
@@ -87,7 +84,6 @@ def get_quote(symbol):
             "change": d.get("dp"),
             "high": d.get("h"),
             "low": d.get("l"),
-            "prev": d.get("pc"),
             "open": d.get("o"),
             "volume": d.get("v") or 0,
         }
@@ -121,19 +117,39 @@ def build_signal(s, q):
     if p <= o:
         return None
 
+    # قريب من القمة
     if p < h * NEAR_HIGH_BUFFER:
         return None
 
-    return f"🚨 {s}\n💰 {round(p,2)}\n⚡ {round(c,2)}%\n💧 {int(v):,}"
+    entry = round(p, 2)
+    stop = round(entry * 0.97, 2)
+    t1 = round(entry * 1.04, 2)
+    t2 = round(entry * 1.08, 2)
+    t3 = round(entry * 1.12, 2)
+
+    return (
+        f"🚨 {s}\n"
+        f"💰 دخول: {entry}\n"
+        f"🛑 وقف: {stop}\n"
+        f"🎯 {t1} | {t2} | {t3}\n"
+        f"⚡ {round(c,2)}%\n"
+        f"💧 {int(v):,}"
+    )
 
 # ===== BOT =====
 def market_bot():
+    if BOT_TOKEN and CHAT_ID:
+        send_message("🔥 البوت شغال")
+
     while True:
         try:
             now = time.time()
 
             for s in WATCHLIST:
                 q = get_quote(s)
+
+                if not q:
+                    continue
 
                 signal = build_signal(s, q)
 
@@ -155,10 +171,11 @@ def market_bot():
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     try:
-        data = request.get_json()
-        message = data.get("message", {})
+        data = request.get_json(force=True)
 
+        message = data.get("message", {})
         user = message.get("from")
+
         if not user:
             return "ok", 200
 

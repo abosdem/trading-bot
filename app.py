@@ -1,6 +1,5 @@
 import os
 import time
-import math
 import threading
 import requests
 from flask import Flask, request
@@ -11,47 +10,45 @@ app = Flask(__name__)
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 TWELVEDATA_API_KEY = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
-ALLOWED_USER_ID = (os.getenv("ALLOWED_USER_ID") or "912977673").strip()
+ALLOWED_USER_ID = (os.getenv("ALLOWED_USER_ID") or "").strip()
 
 # ===== WATCHLIST =====
-# للخطة المجانية: خلها صغيرة ونظيفة
+# مضبوطة للمفتاح المجاني حتى ما ينضرب
 WATCHLIST = [
+    "VEEE",
+    "ATPC",
+    "STI",
+    "SND",
     "VSA",
-    "NIO",
-    "SOUN",
-    "CPIX",
-    "PRSO",
 ]
 
 # ===== SETTINGS =====
 ALERT_COOLDOWN = 45 * 60      # 45 دقيقة
-SCAN_INTERVAL = 180           # كل 3 دقائق
-PER_SYMBOL_DELAY = 1.0
+SCAN_INTERVAL = 300           # كل 5 دقائق
+PER_SYMBOL_DELAY = 2.0        # راحة بين الأسهم
+TIME_SERIES_INTERVAL = "1min"
+TIME_SERIES_OUTPUTSIZE = 15   # أقل عشان نحافظ على المفتاح
 
 MIN_PRICE = 0.50
 MAX_PRICE = 20.0
 
 MIN_CHANGE_PCT = 2.0
-MIN_SESSION_VOLUME = 250000
-MIN_LAST_CANDLE_VOLUME = 10000
+MIN_SESSION_VOLUME = 150000
+MIN_LAST_CANDLE_VOLUME = 7000
 
 NEAR_HIGH_BUFFER = 0.996
 PRESSURE_RECOVERY_MIN = 0.80
 BREAKOUT_RECOVERY_MIN = 0.88
 
-MIN_RVOL_PRESSURE = 1.20
-MIN_RVOL_BREAKOUT = 1.50
+MIN_RVOL_PRESSURE = 1.05
+MIN_RVOL_BREAKOUT = 1.30
 
-MAX_PULLBACK_FROM_HIGH = 0.030
-
-TIME_SERIES_INTERVAL = "1min"
-TIME_SERIES_OUTPUTSIZE = 30
+MAX_PULLBACK_FROM_HIGH = 0.05
 
 DEBUG_MODE = True
 
 # ===== STATE =====
 last_alert = {}
-symbol_state = {}
 
 session = requests.Session()
 session.headers.update({
@@ -60,7 +57,7 @@ session.headers.update({
 })
 
 # ===== HELPERS =====
-def log(msg: str) -> None:
+def log(msg):
     print(msg, flush=True)
 
 def safe_float(value, default=None):
@@ -133,7 +130,7 @@ def handle_command(text, chat_id):
 
     if cmd == "/start":
         send_message(
-            "🚀 البوت الوحش جاهز\n\n"
+            "🚀 البوت جاهز\n\n"
             "/status - حالة البوت\n"
             "/watchlist - قائمة الأسهم\n"
             "/test - اختبار\n"
@@ -197,7 +194,6 @@ def get_time_series(symbol):
 
         data = response.json()
 
-        # Twelve Data يرجع status=error مع message/code أحيانًا
         if isinstance(data, dict) and data.get("status") == "error":
             log(f"Twelve Data api error {symbol}: {data.get('message')}")
             return None
@@ -276,8 +272,7 @@ def get_intraday_metrics(symbol):
         "vwap": vwap,
         "ema9": ema9,
         "ema20": ema20,
-        "prev_high": prev_high,
-        "rows": rows
+        "prev_high": prev_high
     }
 
 # ===== SIGNAL ENGINE =====
@@ -441,14 +436,6 @@ def build_signal(symbol, m):
 
     return message, "ok"
 
-def update_symbol_state(symbol, m):
-    symbol_state[symbol] = {
-        "last_seen_high": m.get("day_high"),
-        "last_seen_price": m.get("price"),
-        "last_seen_session_volume": m.get("session_volume"),
-        "updated_at": time.time()
-    }
-
 # ===== BOT =====
 def market_bot():
     log("🔥 BEAST BOT STARTED")
@@ -488,7 +475,6 @@ def market_bot():
                     if DEBUG_MODE:
                         log(f"{symbol} rejected: {reason}")
 
-                update_symbol_state(symbol, metrics)
                 time.sleep(PER_SYMBOL_DELAY)
 
             time.sleep(SCAN_INTERVAL)
@@ -509,8 +495,8 @@ def telegram_webhook():
             return "ok", 200
 
         user_id = str(user.get("id"))
-        if user_id != ALLOWED_USER_ID:
-            log(f"🚫 BLOCKED: {user_id}")
+        if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
+            log(f"🚫 BLOCKED USER: {user_id}")
             return "ok", 200
 
         text = msg.get("text")
@@ -532,10 +518,10 @@ def home():
 # ===== RUN =====
 if __name__ == "__main__":
     log("🔥 STARTING BEAST BOT...")
-    log(f"BOT_TOKEN: {bool(BOT_TOKEN)}")
-    log(f"CHAT_ID: {bool(CHAT_ID)}")
-    log(f"TWELVEDATA_API_KEY: {bool(TWELVEDATA_API_KEY)}")
-    log(f"ALLOWED_USER_ID: {bool(ALLOWED_USER_ID)}")
+    log(f"BOT_TOKEN loaded: {bool(BOT_TOKEN)}")
+    log(f"CHAT_ID loaded: {bool(CHAT_ID)}")
+    log(f"TWELVEDATA_API_KEY loaded: {bool(TWELVEDATA_API_KEY)}")
+    log(f"ALLOWED_USER_ID loaded: {bool(ALLOWED_USER_ID)}")
 
     threading.Thread(target=market_bot, daemon=True).start()
 

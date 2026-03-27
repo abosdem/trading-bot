@@ -10,10 +10,9 @@ app = Flask(__name__)
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 TWELVEDATA_API_KEY = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
-ALLOWED_USER_ID = (os.getenv("ALLOWED_USER_ID") or "").strip()
+ALLOWED_USER_ID = (os.getenv("ALLOWED_USER_ID") or "912977673").strip()
 
 # ===== WATCHLIST =====
-# مضبوطة للمفتاح المجاني حتى ما ينضرب
 WATCHLIST = [
     "VEEE",
     "ATPC",
@@ -23,11 +22,12 @@ WATCHLIST = [
 ]
 
 # ===== SETTINGS =====
-ALERT_COOLDOWN = 45 * 60      # 45 دقيقة
-SCAN_INTERVAL = 300           # كل 5 دقائق
-PER_SYMBOL_DELAY = 2.0        # راحة بين الأسهم
+ALERT_COOLDOWN = 60 * 60
+SCAN_INTERVAL = 300
+PER_SYMBOL_DELAY = 2.0
+
 TIME_SERIES_INTERVAL = "1min"
-TIME_SERIES_OUTPUTSIZE = 15   # أقل عشان نحافظ على المفتاح
+TIME_SERIES_OUTPUTSIZE = 15
 
 MIN_PRICE = 0.50
 MAX_PRICE = 20.0
@@ -130,9 +130,8 @@ def handle_command(text, chat_id):
 
     if cmd == "/start":
         send_message(
-            "🚀 البوت جاهز\n\n"
+            "🚀 البوت الخاص جاهز\n\n"
             "/status - حالة البوت\n"
-            "/watchlist - قائمة الأسهم\n"
             "/test - اختبار\n"
             "/last - آخر التنبيهات",
             chat_id
@@ -148,9 +147,6 @@ def handle_command(text, chat_id):
             chat_id
         )
 
-    elif cmd == "/watchlist":
-        send_message("📊 القائمة:\n" + "\n".join(WATCHLIST), chat_id)
-
     elif cmd == "/test":
         send_message("🔥 الاختبار ناجح", chat_id)
 
@@ -164,9 +160,6 @@ def handle_command(text, chat_id):
                 mins = int((now_ts - ts) / 60)
                 lines.append(f"{symbol} - قبل {mins} دقيقة")
             send_message("🕘 آخر التنبيهات:\n" + "\n".join(lines), chat_id)
-
-    else:
-        send_message("📩 الأمر غير معروف", chat_id)
 
 # ===== TWELVE DATA =====
 def get_time_series(symbol):
@@ -441,7 +434,7 @@ def market_bot():
     log("🔥 BEAST BOT STARTED")
 
     if BOT_TOKEN and CHAT_ID:
-        send_message("🔥 البوت الوحش على Twelve Data شغال")
+        send_message("🔥 البوت الخاص شغال")
 
     while True:
         try:
@@ -492,12 +485,12 @@ def telegram_webhook():
         user = msg.get("from")
 
         if not user:
-            return "ok", 200
+            return "", 200
 
         user_id = str(user.get("id"))
         if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
             log(f"🚫 BLOCKED USER: {user_id}")
-            return "ok", 200
+            return "", 200
 
         text = msg.get("text")
         chat_id = msg.get("chat", {}).get("id")
@@ -517,7 +510,7 @@ def home():
 
 # ===== RUN =====
 if __name__ == "__main__":
-    log("🔥 STARTING BEAST BOT...")
+    log("🔥 STARTING PRIVATE BOT...")
     log(f"BOT_TOKEN loaded: {bool(BOT_TOKEN)}")
     log(f"CHAT_ID loaded: {bool(CHAT_ID)}")
     log(f"TWELVEDATA_API_KEY loaded: {bool(TWELVEDATA_API_KEY)}")

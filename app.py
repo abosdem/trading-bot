@@ -1,23 +1,18 @@
 import os
 import time
 import threading
-from datetime import datetime, timezone
 import requests
 from flask import Flask, request
 
 app = Flask(__name__)
 
-# =========================
-# ENV
-# =========================
+# ===== ENV =====
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 TWELVEDATA_API_KEY = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
 ALLOWED_USER_ID = (os.getenv("ALLOWED_USER_ID") or "912977673").strip()
 
-# =========================
-# WATCHLIST
-# =========================
+# ===== WATCHLIST =====
 WATCHLIST = [
     "VEEE",
     "ATPC",
@@ -26,14 +21,12 @@ WATCHLIST = [
     "VSA",
 ]
 
-# =========================
-# SETTINGS
-# =========================
-ALERT_COOLDOWN = 60 * 60          # 60 minutes per symbol
-SCAN_INTERVAL = 180               # every 3 minutes
-PER_SYMBOL_DELAY = 4.0            # spacing between API calls
-CACHE_TTL = 75                    # do not refetch same symbol too quickly
-API_BACKOFF_SECONDS = 15 * 60     # if provider complains / rate limit
+# ===== SETTINGS =====
+ALERT_COOLDOWN = 60 * 60
+SCAN_INTERVAL = 180
+PER_SYMBOL_DELAY = 4.0
+CACHE_TTL = 75
+API_BACKOFF_SECONDS = 15 * 60
 
 TIME_SERIES_INTERVAL = "1min"
 TIME_SERIES_OUTPUTSIZE = 15
@@ -41,32 +34,29 @@ TIME_SERIES_OUTPUTSIZE = 15
 MIN_PRICE = 0.50
 MAX_PRICE = 20.0
 
-MIN_CHANGE_PCT = 1.2
-MIN_SESSION_VOLUME = 60000
-MIN_LAST_CANDLE_VOLUME = 5000
+# خففناها عشان ما يفوت الحركة
+MIN_CHANGE_PCT = 1.0
+MIN_SESSION_VOLUME = 40000
+MIN_LAST_CANDLE_VOLUME = 2500
 
 PRESSURE_NEAR_HIGH_BUFFER = 0.985
 BREAKOUT_NEAR_HIGH_BUFFER = 0.996
 
-PRESSURE_RECOVERY_MIN = 0.80
-BREAKOUT_RECOVERY_MIN = 0.88
+PRESSURE_RECOVERY_MIN = 0.75
+BREAKOUT_RECOVERY_MIN = 0.84
 
-MIN_RVOL_PRESSURE = 1.00
-MIN_RVOL_BREAKOUT = 1.25
-MIN_RVOL_LOW_FLOAT = 0.80
+MIN_RVOL_PRESSURE = 0.90
+MIN_RVOL_BREAKOUT = 1.15
+MIN_RVOL_LOW_FLOAT = 0.60
 
-MAX_PULLBACK_FROM_HIGH = 0.06
+MAX_PULLBACK_FROM_HIGH = 0.08
 
 DEBUG_MODE = True
 
-# =========================
-# STATE
-# =========================
+# ===== STATE =====
 last_alert = {}
-last_signal_text = {}
-symbol_cache = {}       # {symbol: {"ts": ..., "rows": [...]}}
+symbol_cache = {}
 provider_backoff_until = 0
-lock = threading.Lock()
 
 session = requests.Session()
 session.headers.update({
@@ -74,9 +64,7 @@ session.headers.update({
     "Accept": "application/json"
 })
 
-# =========================
-# HELPERS
-# =========================
+# ===== HELPERS =====
 def log(msg):
     print(msg, flush=True)
 
@@ -87,6 +75,17 @@ def safe_float(value, default=None):
         return float(value)
     except Exception:
         return default
+
+def now_ts():
+    return time.time()
+
+def provider_in_backoff():
+    return now_ts() < provider_backoff_until
+
+def set_provider_backoff(seconds, reason="provider_backoff"):
+    global provider_backoff_until
+    provider_backoff_until = max(provider_backoff_until, now_ts() + seconds)
+    log(f"⏸️ provider backoff {seconds}s | reason={reason}")
 
 def calc_ema(values, period):
     if not values:
@@ -122,24 +121,7 @@ def calc_vwap(rows):
 
     return total_pv / total_v
 
-def now_ts():
-    return time.time()
-
-def set_provider_backoff(seconds, reason="provider_backoff"):
-    global provider_backoff_until
-    provider_backoff_until = max(provider_backoff_until, now_ts() + seconds)
-    log(f"⏸️ provider backoff for {seconds}s بسبب: {reason}")
-
-def provider_in_backoff():
-    return now_ts() < provider_backoff_until
-
-def format_remaining_backoff():
-    remaining = int(max(0, provider_backoff_until - now_ts()))
-    return f"{remaining}s"
-
-# =========================
-# TELEGRAM
-# =========================
+# ===== TELEGRAM =====
 def send_message(text, chat_id=None):
     target_chat_id = str(chat_id or CHAT_ID).strip()
 
@@ -176,14 +158,12 @@ def handle_command(text, chat_id):
         )
 
     elif cmd == "/status":
-        provider_status = "مؤقتًا متوقف" if provider_in_backoff() else "طبيعي"
         send_message(
             "✅ البوت يعمل\n"
             f"📡 عدد الأسهم: {len(WATCHLIST)}\n"
             f"⏱️ الفحص كل: {SCAN_INTERVAL} ثانية\n"
             f"🧊 التبريد: {ALERT_COOLDOWN // 60} دقيقة\n"
-            f"📊 المصدر: Twelve Data\n"
-            f"🔑 حالة المزود: {provider_status}",
+            f"📊 المصدر: Twelve Data",
             chat_id
         )
 
@@ -204,9 +184,7 @@ def handle_command(text, chat_id):
                 lines.append(f"{symbol} - قبل {mins} دقيقة")
             send_message("🕘 آخر التنبيهات:\n" + "\n".join(lines), chat_id)
 
-# =========================
-# TWELVE DATA
-# =========================
+# ===== DATA =====
 def parse_time_series_rows(values):
     rows = []
 
@@ -240,12 +218,12 @@ def get_time_series(symbol):
         return None
 
     if provider_in_backoff():
-        if DEBUG_MODE:
-            log(f"{symbol} skipped: provider_backoff_{format_remaining_backoff()}")
+        log(f"{symbol} skipped: provider_backoff")
         return None
 
     cached = symbol_cache.get(symbol)
     current = now_ts()
+
     if cached and (current - cached["ts"] < CACHE_TTL):
         return cached["rows"]
 
@@ -274,20 +252,14 @@ def get_time_series(symbol):
 
         data = response.json()
 
-        if not isinstance(data, dict):
-            log(f"Twelve Data invalid json format for {symbol}")
-            set_provider_backoff(180, "invalid_json")
-            return None
+        if isinstance(data, dict) and data.get("status") == "error":
+            msg = str(data.get("message") or "").lower()
+            log(f"Twelve Data api error {symbol}: {msg}")
 
-        if data.get("status") == "error":
-            message = str(data.get("message") or "").lower()
-            log(f"Twelve Data api error {symbol}: {message}")
-
-            if "api" in message or "limit" in message or "frequency" in message or "credits" in message:
-                set_provider_backoff(API_BACKOFF_SECONDS, "api_limit_or_credits")
+            if "limit" in msg or "credit" in msg or "frequency" in msg or "api" in msg:
+                set_provider_backoff(API_BACKOFF_SECONDS, "api_limit")
             else:
                 set_provider_backoff(180, "api_error")
-
             return None
 
         values = data.get("values")
@@ -302,6 +274,7 @@ def get_time_series(symbol):
             "ts": current,
             "rows": rows
         }
+
         return rows
 
     except Exception as e:
@@ -324,6 +297,8 @@ def get_intraday_metrics(symbol):
     open_price = opens[0]
     day_high = max(highs)
     day_low = min(lows)
+    recent_low = min(lows[-8:]) if len(lows) >= 8 else min(lows)
+
     session_volume = sum(volumes)
     last_candle_volume = volumes[-1]
     avg_last_10_volume = sum(volumes[-10:]) / min(10, len(volumes))
@@ -332,7 +307,9 @@ def get_intraday_metrics(symbol):
     ema20 = calc_ema(closes, 20)
     vwap = calc_vwap(rows)
 
-    change_pct = ((price - open_price) / open_price) * 100 if open_price > 0 else 0.0
+    # التعديل المهم: نحسب التغير من القاع القريب
+    change_pct = ((price - recent_low) / recent_low) * 100 if recent_low > 0 else 0.0
+
     rvol = (last_candle_volume / avg_last_10_volume) if avg_last_10_volume > 0 else 0.0
     prev_high = max(highs[:-1]) if len(highs) > 1 else day_high
 
@@ -341,6 +318,7 @@ def get_intraday_metrics(symbol):
         "change_pct": change_pct,
         "day_high": day_high,
         "day_low": day_low,
+        "recent_low": recent_low,
         "open_price": open_price,
         "session_volume": session_volume,
         "last_candle_volume": last_candle_volume,
@@ -352,14 +330,13 @@ def get_intraday_metrics(symbol):
         "prev_high": prev_high
     }
 
-# =========================
-# SIGNAL ENGINE
-# =========================
+# ===== SIGNAL ENGINE =====
 def build_signal(symbol, m):
     price = m["price"]
     change_pct = m["change_pct"]
     day_high = m["day_high"]
     day_low = m["day_low"]
+    recent_low = m["recent_low"]
     open_price = m["open_price"]
     session_volume = m["session_volume"]
     last_candle_volume = m["last_candle_volume"]
@@ -369,6 +346,15 @@ def build_signal(symbol, m):
     ema20 = m["ema20"]
     prev_high = m["prev_high"]
 
+    if DEBUG_MODE:
+        log(
+            f"{symbol} metrics | "
+            f"price={price:.2f} change={change_pct:.2f}% recent_low={recent_low:.2f} "
+            f"session_vol={int(session_volume)} last_vol={int(last_candle_volume)} "
+            f"rvol={rvol:.2f} day_high={day_high:.2f} vwap={vwap:.2f} "
+            f"ema9={ema9:.2f} ema20={ema20:.2f}"
+        )
+
     if price < MIN_PRICE or price > MAX_PRICE:
         return None, "price_outside_range"
 
@@ -377,9 +363,6 @@ def build_signal(symbol, m):
 
     if last_candle_volume < MIN_LAST_CANDLE_VOLUME:
         return None, "low_last_candle_volume"
-
-    if price <= open_price:
-        return None, "below_open"
 
     day_range = day_high - day_low
     if day_range <= 0:
@@ -419,16 +402,16 @@ def build_signal(symbol, m):
         and pressure_near_high
         and above_vwap
         and above_ema9
-        and recovery_ratio >= 0.84
+        and recovery_ratio >= 0.80
         and rvol >= MIN_RVOL_PRESSURE
     )
 
     low_float_momentum = (
         low_liquidity
-        and change_pct >= 8.0
+        and change_pct >= 5.0
         and rvol >= MIN_RVOL_LOW_FLOAT
         and above_vwap
-        and recovery_ratio >= 0.85
+        and recovery_ratio >= 0.80
     )
 
     if not breakout_confirmed and not pressure_setup and not low_float_momentum:
@@ -439,7 +422,7 @@ def build_signal(symbol, m):
     score = 0
     reasons = []
 
-    if change_pct >= 1.2:
+    if change_pct >= 1:
         score += 1
         reasons.append("زخم")
 
@@ -475,34 +458,31 @@ def build_signal(symbol, m):
         score += 1
         reasons.append("فوق EMA20")
 
-    if rvol >= 1.20:
+    if rvol >= 1.00:
         score += 1
         reasons.append("فوليوم لحظي جيد")
 
-    if rvol >= 1.60:
+    if rvol >= 1.50:
         score += 1
         reasons.append("فوليوم لحظي قوي")
-
-    signal_type = None
-    min_score_required = 0
 
     if breakout_confirmed:
         score += 2
         reasons.append("اختراق مؤكد")
         signal_type = "اختراق مؤكد"
-        min_score_required = 7
+        min_score_required = 6
 
     elif low_float_momentum:
         score += 2
         reasons.append("سهم خفيف متحرك")
         signal_type = "مضاربة قوية (سهم خفيف)"
-        min_score_required = 6
+        min_score_required = 5
 
     else:
         score += 1
         reasons.append("ضغط قبل الاختراق")
         signal_type = "ضغط قوي قبل الاختراق"
-        min_score_required = 6
+        min_score_required = 5
 
     if score < min_score_required:
         return None, f"score_too_low_{score}"
@@ -536,6 +516,7 @@ def build_signal(symbol, m):
         f"📈 RVOL: {round(rvol, 2)}\n"
         f"📍 قمة الجلسة: {round(day_high, 2)}\n"
         f"📍 قاع الجلسة: {round(day_low, 2)}\n"
+        f"📍 القاع القريب: {round(recent_low, 2)}\n"
         f"📍 الافتتاح: {round(open_price, 2)}\n"
         f"📈 VWAP: {round(vwap, 4)}\n"
         f"📉 EMA9: {round(ema9, 4)}\n"
@@ -545,9 +526,7 @@ def build_signal(symbol, m):
 
     return message, "ok"
 
-# =========================
-# BOT LOOP
-# =========================
+# ===== BOT =====
 def should_send_symbol(symbol):
     current = now_ts()
     last_ts = last_alert.get(symbol, 0)
@@ -562,9 +541,9 @@ def market_bot():
     while True:
         try:
             if provider_in_backoff():
-                wait_s = max(15, int(provider_backoff_until - now_ts()))
-                log(f"⏸️ paused بسبب حماية المفتاح / المزود: {wait_s}s")
-                time.sleep(wait_s)
+                remain = int(provider_backoff_until - now_ts())
+                log(f"⏸️ paused {remain}s لحماية المفتاح")
+                time.sleep(max(15, remain))
                 continue
 
             log("📊 scanning beast mode...")
@@ -586,12 +565,11 @@ def market_bot():
                             sent = send_message(signal)
                             if sent:
                                 last_alert[symbol] = now_ts()
-                                last_signal_text[symbol] = signal
                                 log(f"sent: {symbol}")
                         else:
                             if DEBUG_MODE:
-                                remaining = int((ALERT_COOLDOWN - (now_ts() - last_alert.get(symbol, 0))) / 60)
-                                log(f"{symbol} rejected: cooldown_{remaining}m")
+                                remain = int((ALERT_COOLDOWN - (now_ts() - last_alert.get(symbol, 0))) / 60)
+                                log(f"{symbol} rejected: cooldown_{remain}m")
                     else:
                         if DEBUG_MODE:
                             log(f"{symbol} rejected: {reason}")
@@ -608,9 +586,7 @@ def market_bot():
             log(f"market_bot error: {e}")
             time.sleep(15)
 
-# =========================
-# WEBHOOK
-# =========================
+# ===== WEBHOOK =====
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     try:
@@ -642,9 +618,7 @@ def telegram_webhook():
 def home():
     return "OK", 200
 
-# =========================
-# RUN
-# =========================
+# ===== RUN =====
 if __name__ == "__main__":
     log("🔥 STARTING PRIVATE BOT...")
     log(f"BOT_TOKEN loaded: {bool(BOT_TOKEN)}")
